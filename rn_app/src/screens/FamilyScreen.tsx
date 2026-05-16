@@ -16,13 +16,14 @@ export default function FamilyScreen() {
     supabase.auth.getUser().then(({ data: { user } }) => {
       if (user) {
         setCurrentUser(user);
-        loadData(user.id);
+        loadData(user);
       }
     });
   }, []);
 
-  const loadData = async (userId: string) => {
+  const loadData = async (userObj: any) => {
     setLoading(true);
+    const userId = userObj.id;
     const online = await checkInternetConnection();
     setIsOnline(online);
 
@@ -45,15 +46,41 @@ export default function FamilyScreen() {
       let primaryHouseholdId = null;
 
       if (!myHouseholds || myHouseholds.length === 0) {
-        const { data: newHouse } = await supabase.from('households').insert({ name: 'Benim Hanem' }).select().single();
-        if (newHouse) {
-          await supabase.from('household_members').insert({
-            household_id: newHouse.id,
+        // Güvenlik: Kullanıcının 'profiles' tablosunda kaydı olduğundan emin olalım
+        // Aksi takdirde foreign_key kısıtlamasından dolayı household_members insert işlemi sessizce başarısız olur.
+        await supabase.from('profiles').upsert({
+          id: userObj.id,
+          email: userObj.email,
+          last_active_at: new Date().toISOString()
+        }, { onConflict: 'id' });
+
+        const generatedHouseholdId = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+          var r = Math.random() * 16 | 0, v = c === 'x' ? r : (r & 0x3 | 0x8);
+          return v.toString(16);
+        });
+
+        const { error: houseError } = await supabase.from('households').insert({ 
+          id: generatedHouseholdId, 
+          name: 'Benim Hanem' 
+        });
+
+        if (!houseError) {
+          const { error: memberError } = await supabase.from('household_members').insert({
+            household_id: generatedHouseholdId,
             user_id: userId,
             role: 'admin',
             status: 'accepted'
           });
-          primaryHouseholdId = newHouse.id;
+
+          if (memberError) {
+            console.error("Hane üyesi olarak eklenemedi:", memberError);
+            Alert.alert("Veritabanı Hatası", "Hane üyesi oluşturulurken hata oluştu: " + memberError.message);
+          } else {
+            primaryHouseholdId = generatedHouseholdId;
+          }
+        } else {
+          console.error("Hane oluşturulamadı:", houseError);
+          Alert.alert("Veritabanı Hatası", "Hane oluşturulamadı: " + houseError.message);
         }
       } else {
         const accepted = myHouseholds.find((h: any) => h.status === 'accepted');
@@ -85,8 +112,7 @@ export default function FamilyScreen() {
           id, user_id, role, status, 
           profiles:user_id (email, full_name, last_active_at)
         `)
-        .eq('household_id', primaryHouseholdId)
-        .eq('status', 'accepted');
+        .eq('household_id', primaryHouseholdId);
 
       if (!allMembers) {
         setMembers([]);
@@ -111,22 +137,27 @@ export default function FamilyScreen() {
           statusColorText = '⚪ Bilinmiyor (Zombi)';
         }
 
-        // Son acil durum raporunu getir (Trafik Lambası Mantığı)
-        const { data: reportData } = await supabase
-          .from('emergency_reports')
-          .select('status_type, created_at')
-          .eq('user_id', m.user_id)
-          .order('created_at', { ascending: false })
-          .limit(1)
-          .single();
+        // Eğer henüz daveti kabul etmediyse
+        if (m.status === 'pending') {
+          statusColorText = '⏳ Davet Onayı Bekleniyor';
+        } else {
+          // Son acil durum raporunu getir (Trafik Lambası Mantığı) - Sadece accepted olanlar için
+          const { data: reportData } = await supabase
+            .from('emergency_reports')
+            .select('status_type, created_at')
+            .eq('user_id', m.user_id)
+            .order('created_at', { ascending: false })
+            .limit(1)
+            .single();
 
-        if (reportData) {
-           lastReportTime = new Date(reportData.created_at).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' });
-           if (reportData.status_type === 'SAFE') {
-              statusColorText = '🟢 Güvende';
-           } else if (reportData.status_type === 'TRAPPED') {
-              statusColorText = '🔴 Tehlikede / Yardım Bekliyor';
-           }
+          if (reportData) {
+             lastReportTime = new Date(reportData.created_at).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' });
+             if (reportData.status_type === 'SAFE') {
+                statusColorText = '🟢 Güvende';
+             } else if (reportData.status_type === 'TRAPPED') {
+                statusColorText = '🔴 Tehlikede / Yardım Bekliyor';
+             }
+          }
         }
 
         enhancedMembers.push({
@@ -157,7 +188,7 @@ export default function FamilyScreen() {
   const handleAcceptInvite = async (inviteId: string) => {
     setLoading(true);
     await supabase.from('household_members').update({ status: 'accepted' }).eq('id', inviteId);
-    await loadData(currentUser.id);
+    await loadData(currentUser);
   };
 
   const inviteMember = async () => {
@@ -180,14 +211,15 @@ export default function FamilyScreen() {
     }
 
     // 2. Davet edilecek e-posta sistemde var mı bul
+    const emailToSearch = newEmail.trim().toLowerCase();
     const { data: targetProfile } = await supabase
       .from('profiles')
       .select('id')
-      .eq('email', newEmail.toLowerCase())
+      .eq('email', emailToSearch)
       .single();
 
     if (!targetProfile) {
-      Alert.alert('Hata', 'Bu e-posta adresine sahip bir kullanıcı bulunamadı. Lütfen önce uygulamaya kayıt olsun.');
+      Alert.alert('Hata', `"${emailToSearch}" adresine sahip bir kullanıcı bulunamadı.\n\nDavet edeceğiniz kişinin önce bu uygulamayı indirip aynı e-posta ile kayıt olması ve giriş yapması gerekmektedir.`);
       setLoading(false);
       return;
     }
@@ -209,8 +241,8 @@ export default function FamilyScreen() {
     if (error) {
       Alert.alert('Hata', 'Davet gönderilemedi. Zaten hanenizde veya davet edilmiş olabilir.');
     } else {
-      Alert.alert('Başarılı', 'Kullanıcıya davet gönderildi. Onayladığında hanenizde görünecektir.');
       setNewEmail('');
+      await loadData(currentUser); // Listeyi anında yenile
     }
     setLoading(false);
   };

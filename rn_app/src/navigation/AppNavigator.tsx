@@ -5,7 +5,7 @@ import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { Ionicons } from '@expo/vector-icons';
 import { supabase } from '../services/supabase';
 import { Session } from '@supabase/supabase-js';
-import { TouchableOpacity, Text, StyleSheet } from 'react-native';
+import { TouchableOpacity, Text, StyleSheet, Platform } from 'react-native';
 
 import HomeScreen from '../screens/HomeScreen';
 import ChatScreen from '../screens/ChatScreen';
@@ -13,6 +13,8 @@ import AuthScreen from '../screens/AuthScreen';
 import InfoScreen from '../screens/InfoScreen';
 import FamilyScreen from '../screens/FamilyScreen';
 import MapScreen from '../screens/MapScreen';
+import AidScreen from '../screens/AidScreen';
+import DashboardScreen from '../screens/DashboardScreen';
 
 export type RootStackParamList = {
   MainTabs: undefined;
@@ -31,8 +33,10 @@ function MainTabs() {
           if (route.name === 'HomeTab') iconName = 'home';
           else if (route.name === 'MapTab') iconName = 'map';
           else if (route.name === 'FamilyTab') iconName = 'people';
-          else if (route.name === 'InfoTab') iconName = 'information-circle';
+          else if (route.name === 'AidTab') iconName = 'heart';
           else if (route.name === 'ChatTab') iconName = 'chatbubbles';
+          else if (route.name === 'InfoTab') iconName = 'information-circle';
+          else if (route.name === 'DashboardTab') iconName = 'bar-chart';
           return <Ionicons name={iconName} size={size} color={color} />;
         },
         headerStyle: { backgroundColor: '#1E293B' },
@@ -49,8 +53,12 @@ function MainTabs() {
       <Tab.Screen name="HomeTab" component={HomeScreen} options={{ title: 'Ana Sayfa' }} />
       <Tab.Screen name="MapTab" component={MapScreen} options={{ title: 'Harita' }} />
       <Tab.Screen name="FamilyTab" component={FamilyScreen} options={{ title: 'Aile' }} />
+      <Tab.Screen name="AidTab" component={AidScreen} options={{ title: 'Yardım' }} />
       <Tab.Screen name="ChatTab" component={ChatScreen} options={{ title: 'Mesajlar' }} />
       <Tab.Screen name="InfoTab" component={InfoScreen} options={{ title: 'Bilgi' }} />
+      {Platform.OS === 'web' && (
+        <Tab.Screen name="DashboardTab" component={DashboardScreen} options={{ title: 'Kriz Masası' }} />
+      )}
     </Tab.Navigator>
   );
 }

@@ -80,6 +80,20 @@ export const initDb = async () => {
       last_report_status TEXT,
       last_report_time TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS aid_requests (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      full_name TEXT,
+      type TEXT NOT NULL,
+      category TEXT NOT NULL,
+      description TEXT,
+      status TEXT DEFAULT 'pending',
+      helper_id TEXT,
+      latitude REAL,
+      longitude REAL,
+      created_at TEXT NOT NULL
+    );
   `);
 };
 
