@@ -1,122 +1,61 @@
-/**
- * WatermelonDB - Supabase Senkronizasyon Servisi
- * 
- * İnternet bağlantısı varken lokal WatermelonDB ile 
- * uzak Supabase veritabanı arasında delta senkronizasyon yapar.
- * 
- * Senkronizasyon mantığı:
- * 1. Pull: Sunucudan son çekimden bu yana değişen kayıtları al
- * 2. Push: Lokal değişiklikleri sunucuya gönder
- * 3. Çakışma çözümü: Sunucu kazanır (server_wins)
- */
-
-import { synchronize } from '@nozbe/watermelondb/sync';
-import database from '../database';
-import supabase from '../config/supabase';
+import * as Network from 'expo-network';
+import { supabase } from './supabase';
+import { getPendingMessages, markMessageAsSynced } from './db';
 
 /**
- * Senkronizasyon ana fonksiyonu.
- * AppState değişikliğinde, ağ bağlantısında veya kullanıcı tetiklemesinde çağrılır.
+ * Cihazın anlık internet bağlantısını kontrol eder.
+ * @returns {Promise<boolean>} İnternet varsa true, yoksa false döner.
  */
-export const syncDatabase = async (): Promise<void> => {
-  try {
-    await synchronize({
-      database,
-
-      /**
-       * Pull: Sunucudan değişiklikleri çek
-       * @param lastPulledAt - Son başarılı çekme zamanı (timestamp)
-       * @returns Değişen kayıtlar (created, updated, deleted)
-       */
-      pullChanges: async ({ lastPulledAt }) => {
-        const timestamp = lastPulledAt || 0;
-
-        // Supabase RPC fonksiyonunu çağırarak delta değişiklikleri al
-        const { data, error } = await supabase.rpc('pull_changes', {
-          last_pulled_at: new Date(timestamp).toISOString(),
-        });
-
-        if (error) {
-          throw new Error(`[Sync] Pull hatası: ${error.message}`);
-        }
-
-        return {
-          changes: data.changes,
-          timestamp: data.timestamp,
-        };
-      },
-
-      /**
-       * Push: Lokal değişiklikleri sunucuya gönder
-       * @param changes - Lokalde yapılan değişiklikler
-       */
-      pushChanges: async ({ changes }) => {
-        const { error } = await supabase.rpc('push_changes', {
-          changes: JSON.stringify(changes),
-        });
-
-        if (error) {
-          throw new Error(`[Sync] Push hatası: ${error.message}`);
-        }
-      },
-
-      // Senkronizasyon sırasında çakışma olursa sunucu versiyonu kazanır
-      sendCreatedAsUpdated: true,
-    });
-
-    console.log('[Sync] Senkronizasyon başarılı');
-  } catch (error) {
-    console.error('[Sync] Senkronizasyon hatası:', error);
-    // Hata durumunda sessizce devam et - offline çalışmaya devam edilir
-  }
+export const checkInternetConnection = async (): Promise<boolean> => {
+  const networkState = await Network.getNetworkStateAsync();
+  return !!networkState.isConnected && !!networkState.isInternetReachable;
 };
 
 /**
- * Belirli bir tablonun verilerini zorla yenile.
- * Örneğin toplanma alanlarını haftada bir güncellemek için kullanılır.
+ * Lokal SQLite'da bekleyen (pending) mesajları Supabase'e gönderir.
+ * Eğer başarılı olursa durumu 'synced' olarak günceller.
  */
-export const forceRefreshTable = async (tableName: string): Promise<void> => {
+export const syncPendingMessages = async () => {
+  const isOnline = await checkInternetConnection();
+  if (!isOnline) return;
+
   try {
-    const { data, error } = await supabase
-      .from(tableName)
-      .select('*');
+    const pendingMessages: any[] = await getPendingMessages();
+    
+    if (pendingMessages.length === 0) return;
 
-    if (error) {
-      throw new Error(`[Sync] ${tableName} yenileme hatası: ${error.message}`);
+    console.log(`${pendingMessages.length} adet bekleyen mesaj senkronize ediliyor...`);
+
+    for (const msg of pendingMessages) {
+      // Supabase tablosuna mesajı ekliyoruz
+      // PostGIS için location formatı (latitude, longitude) uygun bir geometry stringine veya Supabase PostGIS fonksiyonuna dönüştürülebilir
+      // Şimdilik null veya PostGIS raw formata uygun şekilde göndermemiz gerekiyor. Supabase'de PostGIS için st_point vs kullanmak gerek.
+      // Basitlik adına burada text olarak veya Supabase fonksiyonu kullanarak ekleyebiliriz.
+      // Eger Supabase direkt EWKT alıyorsa `SRID=4326;POINT(${longitude} ${latitude})` formatında atabiliriz.
+      
+      let locationData = null;
+      if (msg.longitude !== null && msg.latitude !== null) {
+        locationData = `SRID=4326;POINT(${msg.longitude} ${msg.latitude})`;
+      }
+
+      const { error } = await supabase.from('messages').insert({
+        id: msg.id,
+        sender_name: msg.sender_name,
+        text: msg.text,
+        location: locationData,
+        status: 'synced',
+        created_at: msg.created_at,
+        is_offline: true, // Aslında offline atıldığı için bunu işaretliyoruz
+      });
+
+      if (!error) {
+        // Başarılı ise lokal veritabanında güncelleyelim
+        await markMessageAsSynced(msg.id);
+      } else {
+        console.error("Mesaj senkronizasyon hatası:", error);
+      }
     }
-
-    // Lokal veritabanına toplu yazma
-    await database.write(async () => {
-      const collection = database.get(tableName);
-      
-      // Mevcut kayıtları temizle
-      const existing = await collection.query().fetch();
-      const deleteOps = existing.map((record: any) => record.prepareDestroyPermanently());
-      
-      // Yeni kayıtları ekle
-      const createOps = data.map((item: any) =>
-        collection.prepareCreate((record: any) => {
-          record.remoteId = item.id;
-          // Diğer alanlar tabloya göre dinamik olarak atanır
-          Object.keys(item).forEach((key) => {
-            if (key !== 'id') {
-              try {
-                record[key] = typeof item[key] === 'object'
-                  ? JSON.stringify(item[key])
-                  : item[key];
-              } catch {
-                // Atlanamayan alan, sessizce geç
-              }
-            }
-          });
-        })
-      );
-
-      await database.batch(...deleteOps, ...createOps);
-    });
-
-    console.log(`[Sync] ${tableName} tablosu yenilendi (${data.length} kayıt)`);
   } catch (error) {
-    console.error(`[Sync] ${tableName} yenileme hatası:`, error);
+    console.error("Senkronizasyon sırasında hata oluştu:", error);
   }
 };

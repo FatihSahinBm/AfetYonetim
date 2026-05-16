@@ -1,49 +1,40 @@
-/**
- * AfetYonetim - Ana Uygulama Bileşeni
- * 
- * Uygulamanın giriş noktası. Veritabanı, navigasyon,
- * bildirim kanalları ve mesh ağı başlatma işlemlerini yönetir.
- */
-
-import React, { useEffect } from 'react';
-import { StatusBar, LogBox } from 'react-native';
-import { DatabaseProvider } from '@nozbe/watermelondb/react';
-import database from './src/database';
+import React, { useEffect, useState } from 'react';
+import { View, ActivityIndicator, StyleSheet } from 'react-native';
 import AppNavigator from './src/navigation/AppNavigator';
-import { createNotificationChannels } from './src/services/notificationService';
-import { syncDatabase } from './src/services/syncService';
-import { COLORS } from './src/config/constants';
+import { initDb } from './src/services/db';
 
-// WatermelonDB uyarılarını bastır (geliştirme ortamı)
-LogBox.ignoreLogs(['Require cycle']);
+export default function App() {
+  const [isDbReady, setIsDbReady] = useState(false);
 
-const App: React.FC = () => {
   useEffect(() => {
-    initializeApp();
+    const setupDatabase = async () => {
+      try {
+        await initDb();
+        setIsDbReady(true);
+      } catch (error) {
+        console.error("Veritabanı başlatılamadı:", error);
+      }
+    };
+
+    setupDatabase();
   }, []);
 
-  /** Uygulama başlangıç işlemleri */
-  const initializeApp = async () => {
-    try {
-      // 1. Bildirim kanallarını oluştur
-      await createNotificationChannels();
+  if (!isDbReady) {
+    return (
+      <View style={styles.loadingContainer}>
+        <ActivityIndicator size="large" color="#3B82F6" />
+      </View>
+    );
+  }
 
-      // 2. Veritabanı senkronizasyonunu başlat
-      await syncDatabase();
+  return <AppNavigator />;
+}
 
-      console.log('[App] Uygulama başarıyla başlatıldı');
-    } catch (error) {
-      console.error('[App] Başlatma hatası:', error);
-      // Hata olsa bile uygulama çalışmaya devam eder (offline mod)
-    }
-  };
-
-  return (
-    <DatabaseProvider database={database}>
-      <StatusBar barStyle="light-content" backgroundColor={COLORS.dark} />
-      <AppNavigator />
-    </DatabaseProvider>
-  );
-};
-
-export default App;
+const styles = StyleSheet.create({
+  loadingContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#F1F5F9',
+  },
+});
