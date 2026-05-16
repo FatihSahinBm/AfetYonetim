@@ -1,6 +1,6 @@
 import * as Network from 'expo-network';
 import { supabase } from './supabase';
-import { getPendingMessages, markMessageAsSynced } from './db';
+import { getPendingMessages, markMessageAsSynced, getPendingEmergencyReports, markEmergencyReportAsSynced } from './db';
 
 /**
  * Cihazın anlık internet bağlantısını kontrol eder.
@@ -57,5 +57,43 @@ export const syncPendingMessages = async () => {
     }
   } catch (error) {
     console.error("Senkronizasyon sırasında hata oluştu:", error);
+  }
+};
+
+/**
+ * Lokal SQLite'da bekleyen acil durum raporlarını Supabase'e gönderir.
+ */
+export const syncPendingEmergencyReports = async () => {
+  const isOnline = await checkInternetConnection();
+  if (!isOnline) return;
+
+  try {
+    const pendingReports: any[] = await getPendingEmergencyReports();
+    
+    if (pendingReports.length === 0) return;
+
+    for (const report of pendingReports) {
+      let locationData = null;
+      if (report.longitude !== null && report.latitude !== null) {
+        locationData = `SRID=4326;POINT(${report.longitude} ${report.latitude})`;
+      }
+
+      const { error } = await supabase.from('emergency_reports').insert({
+        id: report.id,
+        status_type: report.status_type,
+        location: locationData,
+        status: 'synced',
+        created_at: report.created_at,
+        is_offline: true,
+      });
+
+      if (!error) {
+        await markEmergencyReportAsSynced(report.id);
+      } else {
+        console.error("Acil durum raporu senkronizasyon hatası:", error);
+      }
+    }
+  } catch (error) {
+    console.error("Acil durum raporu senkronizasyonu sırasında hata oluştu:", error);
   }
 };
