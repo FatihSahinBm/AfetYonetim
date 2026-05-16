@@ -3,15 +3,16 @@
  * 
  * Supabase bağlantısını merkezi olarak yönetir.
  * Tüm API çağrıları bu istemci üzerinden yapılır.
- * Çevresel değişkenlerden URL ve anon key alır.
+ * Çevresel değişkenler .env dosyasından react-native-config ile okunur.
  */
 
 import { createClient } from '@supabase/supabase-js';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import Config from 'react-native-config';
 
-// Supabase proje bilgileri - .env dosyasından okunmalıdır
-const SUPABASE_URL = 'https://YOUR_PROJECT.supabase.co';
-const SUPABASE_ANON_KEY = 'YOUR_ANON_KEY';
+// Supabase proje bilgileri .env dosyasından okunur
+const SUPABASE_URL = Config.SUPABASE_URL || '';
+const SUPABASE_ANON_KEY = Config.SUPABASE_ANON_KEY || '';
 
 /**
  * Supabase istemcisini AsyncStorage ile başlatır.
