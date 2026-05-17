@@ -15,6 +15,7 @@ import FamilyScreen from '../screens/FamilyScreen';
 import MapScreen from '../screens/MapScreen';
 import AidScreen from '../screens/AidScreen';
 import DashboardScreen from '../screens/DashboardScreen';
+import ProfileScreen from '../screens/ProfileScreen';
 
 export type RootStackParamList = {
   MainTabs: undefined;
@@ -36,6 +37,7 @@ function MainTabs() {
           else if (route.name === 'AidTab') iconName = 'heart';
           else if (route.name === 'ChatTab') iconName = 'chatbubbles';
           else if (route.name === 'InfoTab') iconName = 'information-circle';
+          else if (route.name === 'ProfileTab') iconName = 'person';
           else if (route.name === 'DashboardTab') iconName = 'bar-chart';
           return <Ionicons name={iconName} size={size} color={color} />;
         },
@@ -43,11 +45,6 @@ function MainTabs() {
         headerTintColor: '#fff',
         tabBarActiveTintColor: '#3B82F6',
         tabBarInactiveTintColor: 'gray',
-        headerRight: () => (
-          <TouchableOpacity onPress={() => supabase.auth.signOut()} style={{ marginRight: 15 }}>
-            <Text style={{ color: '#EF4444', fontWeight: 'bold' }}>Çıkış</Text>
-          </TouchableOpacity>
-        )
       })}
     >
       <Tab.Screen name="HomeTab" component={HomeScreen} options={{ title: 'Ana Sayfa' }} />
@@ -56,6 +53,7 @@ function MainTabs() {
       <Tab.Screen name="AidTab" component={AidScreen} options={{ title: 'Yardım' }} />
       <Tab.Screen name="ChatTab" component={ChatScreen} options={{ title: 'Mesajlar' }} />
       <Tab.Screen name="InfoTab" component={InfoScreen} options={{ title: 'Bilgi' }} />
+      <Tab.Screen name="ProfileTab" component={ProfileScreen} options={{ title: 'Profil' }} />
       {Platform.OS === 'web' && (
         <Tab.Screen name="DashboardTab" component={DashboardScreen} options={{ title: 'Kriz Masası' }} />
       )}

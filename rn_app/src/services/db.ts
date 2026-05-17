@@ -95,6 +95,20 @@ export const initDb = async () => {
       longitude REAL,
       created_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS hazard_reports (
+      id TEXT PRIMARY KEY,
+      user_id TEXT,
+      hazard_type TEXT NOT NULL,
+      description TEXT,
+      latitude REAL,
+      longitude REAL,
+      image_uri TEXT,
+      upvotes INTEGER DEFAULT 0,
+      downvotes INTEGER DEFAULT 0,
+      status TEXT DEFAULT 'pending',
+      created_at TEXT NOT NULL
+    );
   `);
 };
 
@@ -199,4 +213,81 @@ export const cacheHouseholdMembers = async (members: any[]) => {
 export const getCachedHouseholdMembers = async () => {
   const db = await getDb();
   return await db.getAllAsync('SELECT * FROM household_members');
+};
+
+/**
+ * Tehlike raporunu SQLite'a kaydeder.
+ */
+export const insertHazardReport = async (
+  id: string,
+  user_id: string | null,
+  hazard_type: string,
+  description: string,
+  latitude: number | null,
+  longitude: number | null,
+  image_uri: string | null,
+  status: string,
+  created_at: string
+) => {
+  const db = await getDb();
+  await db.runAsync(
+    'INSERT INTO hazard_reports (id, user_id, hazard_type, description, latitude, longitude, image_uri, upvotes, downvotes, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)',
+    [id, user_id, hazard_type, description, latitude, longitude, image_uri, status, created_at]
+  );
+};
+
+export const getPendingHazardReports = async () => {
+  const db = await getDb();
+  return await db.getAllAsync("SELECT * FROM hazard_reports WHERE status = 'pending'");
+};
+
+export const markHazardReportAsSynced = async (id: string) => {
+  const db = await getDb();
+  await db.runAsync("UPDATE hazard_reports SET status = 'synced' WHERE id = ?", [id]);
+};
+
+export const updateHazardReportVotes = async (id: string, voteType: 'up' | 'down') => {
+  const db = await getDb();
+  if (voteType === 'up') {
+    await db.runAsync("UPDATE hazard_reports SET upvotes = upvotes + 1 WHERE id = ?", [id]);
+  } else {
+    await db.runAsync("UPDATE hazard_reports SET downvotes = downvotes + 1 WHERE id = ?", [id]);
+  }
+};
+
+/**
+ * Yardım / İhbar (Aid Request) fonksiyonları
+ */
+export const insertAidRequest = async (
+  id: string,
+  user_id: string,
+  full_name: string | null,
+  type: string,
+  category: string,
+  description: string | null,
+  status: string,
+  latitude: number | null,
+  longitude: number | null,
+  created_at: string
+) => {
+  const db = await getDb();
+  await db.runAsync(
+    'INSERT INTO aid_requests (id, user_id, full_name, type, category, description, status, latitude, longitude, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    [id, user_id, full_name, type, category, description, status, latitude, longitude, created_at]
+  );
+};
+
+export const getPendingAidRequests = async () => {
+  const db = await getDb();
+  return await db.getAllAsync("SELECT * FROM aid_requests WHERE status = 'pending'");
+};
+
+export const markAidRequestAsSynced = async (id: string) => {
+  const db = await getDb();
+  await db.runAsync("UPDATE aid_requests SET status = 'synced' WHERE id = ?", [id]);
+};
+
+export const updateAidRequestStatus = async (id: string, status: string, helper_id: string | null = null) => {
+  const db = await getDb();
+  await db.runAsync("UPDATE aid_requests SET status = ?, helper_id = ? WHERE id = ?", [status, helper_id, id]);
 };

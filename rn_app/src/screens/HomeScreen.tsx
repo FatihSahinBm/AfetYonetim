@@ -1,19 +1,21 @@
-import React, { useEffect, useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, FlatList, ActivityIndicator, AppState, Alert, Vibration, Platform } from 'react-native';
+import React, { useEffect, useState, useCallback } from 'react';
+import { View, Text, StyleSheet, TouchableOpacity, FlatList, ActivityIndicator, AppState, Alert, Vibration, Platform, Modal, TextInput, Image, ScrollView } from 'react-native';
 import * as Location from 'expo-location';
 import * as Battery from 'expo-battery';
 import { Barometer } from 'expo-sensors';
 import { Audio } from 'expo-av';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
+import { useFocusEffect } from '@react-navigation/native';
 import { RootStackParamList } from '../navigation/AppNavigator';
 import { checkInternetConnection, syncPendingMessages, syncPendingEmergencyReports } from '../services/syncService';
 import { supabase } from '../services/supabase';
-import { getDb, insertEmergencyReport } from '../services/db';
+import { getDb, insertEmergencyReport, insertAidRequest, updateHazardReportVotes } from '../services/db';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import DisasterAlert from '../components/DisasterAlert';
 import { generateSyntheticSiren } from '../utils/audioGenerator';
 
 const generateId = () => {
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
     var r = Math.random() * 16 | 0, v = c === 'x' ? r : (r & 0x3 | 0x8);
     return v.toString(16);
   });
@@ -29,17 +31,28 @@ export default function HomeScreen({ navigation }: Props) {
   const [gatheringPoints, setGatheringPoints] = useState<any[]>([]);
   const [sirenPlaying, setSirenPlaying] = useState<boolean>(false);
   const [sound, setSound] = useState<Audio.Sound | null>(null);
-  const [floodRisk, setFloodRisk] = useState<{level: 'LOW' | 'HIGH', rain: number, capacity: number} | null>(null);
-  const [quakeRisk, setQuakeRisk] = useState<{level: 'LOW' | 'MEDIUM' | 'HIGH', distance: number, ground: string} | null>(null);
+  const [floodRisk, setFloodRisk] = useState<{ level: 'LOW' | 'HIGH', rain: number, capacity: number } | null>(null);
+  const [quakeRisk, setQuakeRisk] = useState<{ level: 'LOW' | 'MEDIUM' | 'HIGH', distance: number, ground: string } | null>(null);
+
+  // Yardım İste form stateleri
+  const [showAidModal, setShowAidModal] = useState(false);
+  const [aidFullName, setAidFullName] = useState('');
+  const [aidType, setAidType] = useState('Tıbbi Yardım');
+  const [aidDesc, setAidDesc] = useState('');
+
+  // Tehlike raporları (Topluluk Oylaması)
+  const [communityHazards, setCommunityHazards] = useState<any[]>([]);
+  // Kullanıcının oy verdiği ihbar id'leri
+  const [votedHazards, setVotedHazards] = useState<Set<string>>(new Set());
 
   // Yapay Zeka Sel ve Deprem Analizleri Simülasyonu
   useEffect(() => {
     const calculateFloodRisk = async () => {
       // Bulunduğu bölgenin altyapı kapasitesini 40mm/saat varsayalım
-      const capacity = 40; 
+      const capacity = 40;
       // Mevsimsel ve anlık meteorolojik uydu verilerinden çekilen tahmini yağış
       const rainExpected = Math.floor(Math.random() * 50) + 15; // 15-65 mm arası
-      
+
       setFloodRisk({
         level: rainExpected > capacity ? 'HIGH' : 'LOW',
         rain: rainExpected,
@@ -51,10 +64,10 @@ export default function HomeScreen({ navigation }: Props) {
     const calculateQuakeRisk = async () => {
       const distances = [1.2, 4.5, 12.8, 35.0, 50.2];
       const grounds = ['ZA (Sağlam Kaya)', 'ZB (Az Ayrışmış Kaya)', 'ZC (Sıkı Kum/Çakıl)', 'ZD (Yumuşak Zemin)'];
-      
+
       const randDist = distances[Math.floor(Math.random() * distances.length)];
       const randGround = grounds[Math.floor(Math.random() * grounds.length)];
-      
+
       let level: 'LOW' | 'MEDIUM' | 'HIGH' = 'LOW';
       if (randDist < 5 || randGround.includes('ZD')) {
         level = 'HIGH';
@@ -74,16 +87,16 @@ export default function HomeScreen({ navigation }: Props) {
   // Batarya seviye kontrolü
   useEffect(() => {
     if (Platform.OS === 'web') return;
-    
+
     let batterySubscription: Battery.Subscription | null = null;
-    
+
     const checkBattery = async () => {
       try {
         const batteryLevel = await Battery.getBatteryLevelAsync();
         if (batteryLevel > 0 && batteryLevel <= 0.20) {
           Alert.alert('Pil Uyarısı', 'Şarjınız %20\'nin altında! Gereksiz özellikleri kapatıp, ekran parlaklığını kısarak pil tasarrufu yapınız.');
         }
-      } catch (e) {}
+      } catch (e) { }
     };
 
     checkBattery();
@@ -93,7 +106,7 @@ export default function HomeScreen({ navigation }: Props) {
           Alert.alert('Kritik Pil', `Şarjınız %${Math.round(batteryLevel * 100)}'e düştü!`);
         }
       });
-    } catch (e) {}
+    } catch (e) { }
 
     return () => {
       if (batterySubscription) {
@@ -115,7 +128,7 @@ export default function HomeScreen({ navigation }: Props) {
     } else {
       // Titreşimi başlat
       Vibration.vibrate([500, 500, 500], true);
-      
+
       try {
         // Önceden izinleri veya ses ayarlarını kontrol edelim
         await Audio.setAudioModeAsync({
@@ -143,12 +156,12 @@ export default function HomeScreen({ navigation }: Props) {
   const checkNetworkAndSync = async () => {
     const online = await checkInternetConnection();
     setIsOnline(online);
-    
+
     if (online) {
       // 1. Bekleyen mesajları Supabase'e gönder
       await syncPendingMessages();
       await syncPendingEmergencyReports();
-      
+
       // 2. Supabase'den toplanma alanlarını çekip SQLite'a kaydet
       await syncGatheringPoints();
     } else {
@@ -164,17 +177,17 @@ export default function HomeScreen({ navigation }: Props) {
         const db = await getDb();
         // Önce eskileri temizle (basit bir yenileme mantığı)
         await db.runAsync('DELETE FROM gathering_points');
-        
+
         for (const pt of data) {
           await db.runAsync(
             'INSERT INTO gathering_points (id, name, description, capacity, latitude, longitude, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
             [
-              pt.id ?? '', 
-              pt.name ?? 'Bilinmeyen Alan', 
-              pt.description ?? '', 
-              pt.capacity ?? 0, 
-              0, 
-              0, 
+              pt.id ?? '',
+              pt.name ?? 'Bilinmeyen Alan',
+              pt.description ?? '',
+              pt.capacity ?? 0,
+              0,
+              0,
               pt.created_at ?? new Date().toISOString()
             ]
           );
@@ -190,7 +203,19 @@ export default function HomeScreen({ navigation }: Props) {
   const loadGatheringPointsFromLocal = async () => {
     const db = await getDb();
     const rows = await db.getAllAsync('SELECT * FROM gathering_points ORDER BY created_at DESC');
-    setGatheringPoints(rows);
+    
+    if (rows.length === 0) {
+      // Mock data if DB is empty
+      const mockPoints = [
+        { id: 'm1', name: 'Atatürk Kent Parkı (Açık Alan)', description: 'Geniş açık alan, çadır kurulabilir.', capacity: 500 },
+        { id: 'm2', name: 'Belediye Meydanı', description: 'Geçici acil durum toplanma noktası.', capacity: 200 },
+        { id: 'm3', name: 'Millet Bahçesi', description: 'Acil durum gıda ve su destek merkezi.', capacity: 1000 },
+        { id: 'm4', name: '75. Yıl İlköğretim Okulu Bahçesi', description: 'Güvenli bölge.', capacity: 300 },
+      ];
+      setGatheringPoints(mockPoints);
+    } else {
+      setGatheringPoints(rows);
+    }
     setLoading(false);
   };
 
@@ -207,6 +232,7 @@ export default function HomeScreen({ navigation }: Props) {
     // Ayrıca her 10 saniyede bir polling yapalım
     const interval = setInterval(() => {
       checkNetworkAndSync();
+      fetchCommunityHazards();
     }, 10000);
 
     return () => {
@@ -219,10 +245,99 @@ export default function HomeScreen({ navigation }: Props) {
     };
   }, [sound]);
 
+  const fetchCommunityHazards = async () => {
+    try {
+      const isOnline = await checkInternetConnection();
+      let fetchedHazards: any[] = [];
+      if (isOnline) {
+        // En az 3 yalanlama almayanları getir
+        const { data } = await supabase
+          .from('hazard_reports')
+          .select('id, hazard_type, description, image_uri, upvotes, downvotes, created_at')
+          .lt('downvotes', 3)
+          .order('created_at', { ascending: false });
+
+        if (data) fetchedHazards = data;
+      } else {
+        const db = await getDb();
+        const rows = await db.getAllAsync("SELECT * FROM hazard_reports WHERE downvotes < 3 ORDER BY created_at DESC");
+        fetchedHazards = rows;
+      }
+
+      // Test için mock data
+      if (fetchedHazards.length === 0) {
+        fetchedHazards = [
+          {
+            id: 'mock_haz_1',
+            hazard_type: 'ENKAZ',
+            description: 'Atatürk Caddesi üzerinde eski bir bina yola doğru çöktü, yol tamamen kapalı durumda. Lütfen bu güzergahı kullanmayın!',
+            upvotes: 12,
+            downvotes: 1,
+          },
+          {
+            id: 'mock_haz_2',
+            hazard_type: 'YANGIN',
+            description: 'Ormanlık alanda dumanlar yükseliyor, rüzgar şehre doğru esiyor. İtfaiye henüz bölgede değil.',
+            upvotes: 5,
+            downvotes: 0,
+          }
+        ];
+      }
+      setCommunityHazards(fetchedHazards);
+    } catch (e) {
+      console.log('Tehlike raporları listesi çekilemedi:', e);
+    }
+  };
+
+  useFocusEffect(
+    useCallback(() => {
+      fetchCommunityHazards();
+      // Daha önce oy verilmiş ihbarları yükle
+      AsyncStorage.getItem('voted_hazards').then(val => {
+        if (val) setVotedHazards(new Set(JSON.parse(val)));
+      });
+    }, [])
+  );
+
+  const handleVoteHazard = async (id: string, type: 'up' | 'down') => {
+    // Daha önce oy kullanmış mı kontrol et
+    if (votedHazards.has(id)) {
+      Alert.alert('Oy Kullanıldı', 'Bu ihbar için zaten oy kullandınız. Her ihbar için sadece bir kez oy verebilirsiniz.');
+      return;
+    }
+
+    try {
+      const isOnline = await checkInternetConnection();
+      if (isOnline) {
+        const { data } = await supabase.from('hazard_reports').select('upvotes, downvotes').eq('id', id).single();
+        if (data) {
+          if (type === 'up') {
+            await supabase.from('hazard_reports').update({ upvotes: data.upvotes + 1 }).eq('id', id);
+          } else {
+            await supabase.from('hazard_reports').update({ downvotes: data.downvotes + 1 }).eq('id', id);
+          }
+        }
+      } else {
+        await updateHazardReportVotes(id, type);
+      }
+
+      // Oyu kaydet (bu cihazda bir daha oy kullanılamasın)
+      const newVoted = new Set(votedHazards);
+      newVoted.add(id);
+      setVotedHazards(newVoted);
+      await AsyncStorage.setItem('voted_hazards', JSON.stringify(Array.from(newVoted)));
+
+      // UI hemen güncellensin
+      fetchCommunityHazards();
+    } catch (error) {
+      console.log('Oylama hatası:', error);
+    }
+  };
+
   const handleEmergencyReport = async (statusType: 'SAFE' | 'TRAPPED') => {
     // Hemen geri bildirim ver (UI'da gecikme hissini azaltmak için)
     Alert.alert(
-      'İşlem Başlatıldı', 
+      'İşlem Başlatıldı',
       'Konumunuz alınıyor ve raporunuz iletiliyor...'
     );
 
@@ -230,7 +345,7 @@ export default function HomeScreen({ navigation }: Props) {
     try {
       // Önce hızlıca son bilinen konumu almayı dene
       location = await Location.getLastKnownPositionAsync({});
-      
+
       // Eğer yoksa orta doğrulukta hızlıca al
       if (!location) {
         location = await Location.getCurrentPositionAsync({
@@ -257,8 +372,8 @@ export default function HomeScreen({ navigation }: Props) {
         if (lat !== null && lon !== null) {
           locationData = `SRID=4326;POINT(${lon} ${lat})`;
         }
-        
-        await supabase.from('emergency_reports').insert({
+
+        const { error } = await supabase.from('emergency_reports').insert({
           id: newId,
           user_id: userId,
           status_type: statusType,
@@ -269,6 +384,12 @@ export default function HomeScreen({ navigation }: Props) {
           created_at: createdAt,
           is_offline: false,
         });
+
+        if (error) {
+          Alert.alert('Supabase Hatası', 'Güvenlik bildiriminiz sunucuya iletilemedi:\n\n' + error.message);
+          console.error('Supabase Insert Error:', error);
+          await insertEmergencyReport(newId, userId, statusType, lat, lon, 'pending', createdAt);
+        }
       } else {
         await insertEmergencyReport(newId, userId, statusType, lat, lon, 'pending', createdAt);
       }
@@ -277,9 +398,75 @@ export default function HomeScreen({ navigation }: Props) {
     processReport();
 
     Alert.alert(
-      'Durum Bildirildi', 
+      'Durum Bildirildi',
       statusType === 'SAFE' ? 'Güvende olduğunuz sisteme iletildi.' : 'Mahsur kalma durumunuz ve konumunuz acil durum ekiplerine iletildi.'
     );
+  };
+
+  const handleAidRequest = async () => {
+    if (!aidDesc.trim() || !aidFullName.trim()) {
+      Alert.alert('Hata', 'Lütfen ad soyad ve açıklama alanlarını doldurun.');
+      return;
+    }
+    Alert.alert('İşlem Başlatıldı', 'Yardım çağrınız iletiliyor...');
+    setShowAidModal(false);
+
+    let location: Location.LocationObject | null = null;
+    try {
+      location = await Location.getLastKnownPositionAsync({});
+      if (!location) {
+        location = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+      }
+    } catch (e) {
+      console.error('Konum alınamadı:', e);
+    }
+
+    const newId = generateId();
+    const lat = location ? location.coords.latitude : null;
+    const lon = location ? location.coords.longitude : null;
+    const createdAt = new Date().toISOString();
+
+    const processAid = async () => {
+      const { data: authData } = await supabase.auth.getSession();
+      const userId = authData?.session?.user?.id || newId; // Fallback to newId if offline/no session
+
+      const online = await checkInternetConnection();
+      if (online) {
+        let locationData = null;
+        if (lat !== null && lon !== null) {
+          locationData = `SRID=4326;POINT(${lon} ${lat})`;
+        }
+
+        const { error } = await supabase.from('aid_requests').insert({
+          id: newId,
+          user_id: userId,
+          full_name: aidFullName,
+          type: aidType,
+          category: 'acil',
+          description: aidDesc,
+          status: 'pending',
+          latitude: lat,
+          longitude: lon,
+          location: locationData,
+          created_at: createdAt
+        });
+        
+        if (error) {
+          Alert.alert('Supabase Hatası', 'Yardım çağrınız sunucuya iletilemedi:\n\n' + error.message);
+          console.error('Supabase Insert Error:', error);
+          await insertAidRequest(newId, userId, aidFullName, aidType, 'acil', aidDesc, 'pending', lat, lon, createdAt);
+        }
+      } else {
+        await insertAidRequest(newId, userId, aidFullName, aidType, 'acil', aidDesc, 'pending', lat, lon, createdAt);
+      }
+      
+      setAidDesc('');
+      setAidFullName('');
+      setAidType('Tıbbi Yardım');
+      Alert.alert('Başarılı', 'Yardım çağrınız sisteme ulaştı. Bölgedeki gönüllüler haberdar edildi.');
+    };
+    
+    processAid();
   };
 
   const renderGatheringPoint = ({ item }: { item: any }) => (
@@ -293,7 +480,7 @@ export default function HomeScreen({ navigation }: Props) {
   );
 
   return (
-    <View style={styles.container}>
+    <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
       <View style={[styles.statusBar, { backgroundColor: isOnline ? '#10B981' : '#EF4444' }]}>
         <Text style={styles.statusText}>
           {isOnline ? '🟢 ÇEVRİMİÇİ (Senkronize)' : '🔴 ÇEVRİMDİŞİ (Lokal Veritabanı)'}
@@ -301,21 +488,21 @@ export default function HomeScreen({ navigation }: Props) {
       </View>
 
       {/* Dinamik Afet Uyarısı Simülasyonu */}
-      <DisasterAlert 
-        type="FIRE" 
-        title="YANGIN UYARISI" 
-        message="Tahmini 15 dk içinde yangın bölgenize sıçrayabilir. Acil tahliye planına uyun!" 
+      <DisasterAlert
+        type="FIRE"
+        title="YANGIN UYARISI"
+        message="Tahmini 15 dk içinde yangın bölgenize sıçrayabilir. Acil tahliye planına uyun!"
       />
 
       <View style={styles.emergencyContainer}>
-        <TouchableOpacity 
+        <TouchableOpacity
           style={[styles.emergencyBtn, styles.safeBtn]}
           onPress={() => handleEmergencyReport('SAFE')}
         >
           <Text style={styles.emergencyBtnText}>BEN İYİYİM</Text>
         </TouchableOpacity>
-        
-        <TouchableOpacity 
+
+        <TouchableOpacity
           style={[styles.emergencyBtn, styles.trappedBtn]}
           onPress={() => handleEmergencyReport('TRAPPED')}
         >
@@ -324,11 +511,18 @@ export default function HomeScreen({ navigation }: Props) {
       </View>
 
       <View style={styles.secondaryActionsContainer}>
-        <TouchableOpacity 
+        <TouchableOpacity
           style={[styles.actionBtn, sirenPlaying ? styles.sirenActiveBtn : styles.sirenBtn]}
           onPress={toggleSiren}
         >
           <Text style={styles.actionBtnText}>{sirenPlaying ? 'SİRENİ KAPAT' : 'SİREN ÇAL'}</Text>
+        </TouchableOpacity>
+        
+        <TouchableOpacity
+          style={[styles.actionBtn, { backgroundColor: '#3B82F6' }]}
+          onPress={() => setShowAidModal(true)}
+        >
+          <Text style={styles.actionBtnText}>🆘 YARDIM İSTE</Text>
         </TouchableOpacity>
       </View>
 
@@ -342,7 +536,7 @@ export default function HomeScreen({ navigation }: Props) {
             </View>
           </View>
           <Text style={styles.aiDesc}>
-            Bulunduğunuz bölgenin altyapı su kaldırma kapasitesi: <Text style={{fontWeight: 'bold'}}>{floodRisk.capacity} mm/saat</Text>.
+            Bulunduğunuz bölgenin altyapı su kaldırma kapasitesi: <Text style={{ fontWeight: 'bold' }}>{floodRisk.capacity} mm/saat</Text>.
           </Text>
           <Text style={[styles.aiDesc, { marginTop: 4, color: floodRisk.level === 'HIGH' ? '#EF4444' : '#475569', fontWeight: floodRisk.level === 'HIGH' ? 'bold' : 'normal' }]}>
             Tahmini anlık yağış: {floodRisk.rain} mm/saat.
@@ -361,10 +555,10 @@ export default function HomeScreen({ navigation }: Props) {
             </View>
           </View>
           <Text style={styles.aiDesc}>
-            Zemin Sınıfı: <Text style={{fontWeight: 'bold'}}>{quakeRisk.ground}</Text>
+            Zemin Sınıfı: <Text style={{ fontWeight: 'bold' }}>{quakeRisk.ground}</Text>
           </Text>
           <Text style={styles.aiDesc}>
-            Aktif Fay Hattına Uzaklık: <Text style={{fontWeight: 'bold'}}>{quakeRisk.distance} km</Text>
+            Aktif Fay Hattına Uzaklık: <Text style={{ fontWeight: 'bold' }}>{quakeRisk.distance} km</Text>
           </Text>
           <Text style={[styles.aiDesc, { marginTop: 4, color: quakeRisk.level === 'HIGH' ? '#EF4444' : '#475569', fontWeight: quakeRisk.level === 'HIGH' ? 'bold' : 'normal' }]}>
             {quakeRisk.level === 'HIGH' ? ' DİKKAT: Zemin sıvılaşma riski veya faya yakınlık sebebiyle binanızın acil deprem dayanım testi yaptırması önerilir!' : ' Bulunduğunuz zemin ve konum itibarıyla risk standart seviyededir.'}
@@ -372,25 +566,117 @@ export default function HomeScreen({ navigation }: Props) {
         </View>
       )}
 
+      {/* Tehlike İhbarları Doğrulama Kartları */}
+      <View style={{ marginTop: 8, paddingHorizontal: 16 }}>
+        <Text style={[styles.sectionTitle, { marginBottom: 8 }]}>Çevrenizdeki Tehlike Bildirimleri</Text>
+        {communityHazards.length > 0 ? (
+          <FlatList
+            horizontal
+            data={communityHazards}
+            keyExtractor={(item) => item.id}
+            showsHorizontalScrollIndicator={false}
+            renderItem={({ item }) => (
+              <View style={styles.hazardCard}>
+                <View style={styles.hazardHeader}>
+                  <Text style={styles.hazardTitle}>⚠️ {item.hazard_type}</Text>
+                  <Text style={styles.hazardVotes}>👍 {item.upvotes}  👎 {item.downvotes}</Text>
+                </View>
+                {item.image_uri && (
+                  <Image source={{ uri: item.image_uri }} style={styles.hazardImage} />
+                )}
+                <Text style={styles.hazardDescText} numberOfLines={3}>{item.description}</Text>
+                <View style={styles.voteContainer}>
+                  {votedHazards.has(item.id) ? (
+                    <View style={[styles.voteBtn, { flex: 1, backgroundColor: '#94A3B8' }]}>
+                      <Text style={styles.voteBtnText}>✅ Oyunuzu Kullandınız</Text>
+                    </View>
+                  ) : (
+                    <>
+                      <TouchableOpacity style={[styles.voteBtn, styles.voteUpBtn]} onPress={() => handleVoteHazard(item.id, 'up')}>
+                        <Text style={styles.voteBtnText}>👍 Evet</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity style={[styles.voteBtn, styles.voteDownBtn]} onPress={() => handleVoteHazard(item.id, 'down')}>
+                        <Text style={styles.voteBtnText}>👎 Hayır</Text>
+                      </TouchableOpacity>
+                    </>
+                  )}
+                </View>
+              </View>
+            )}
+          />
+        ) : (
+          <Text style={{ color: '#64748B', fontStyle: 'italic', marginBottom: 12 }}>
+            Şu an çevrenizde doğrulanmayı bekleyen bir tehlike ihbarı bulunmuyor.
+          </Text>
+        )}
+      </View>
+
       <View style={styles.content}>
         <Text style={styles.sectionTitle}>Toplanma Alanları</Text>
-        
+
         {loading ? (
           <ActivityIndicator size="large" color="#3B82F6" />
         ) : gatheringPoints.length === 0 ? (
           <Text style={styles.emptyText}>Henüz toplanma alanı verisi yok.</Text>
         ) : (
-          <FlatList
-            data={gatheringPoints}
-            keyExtractor={(item) => item.id}
-            renderItem={renderGatheringPoint}
-            contentContainerStyle={styles.listContainer}
-            showsVerticalScrollIndicator={false}
-          />
+          <View style={styles.listContainer}>
+            {gatheringPoints.map((item) => (
+              <React.Fragment key={item.id}>
+                {renderGatheringPoint({ item })}
+              </React.Fragment>
+            ))}
+          </View>
         )}
       </View>
 
-    </View>
+      {/* Yardım İste Modal Formu */}
+      <Modal visible={showAidModal} transparent animationType="slide">
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>🆘 Yardım / İhbar Formu</Text>
+            
+            <TextInput
+              style={styles.input}
+              placeholder="Ad Soyad"
+              placeholderTextColor="#94A3B8"
+              value={aidFullName}
+              onChangeText={setAidFullName}
+            />
+            
+            <Text style={styles.label}>İhtiyaç Türü:</Text>
+            <View style={styles.typeContainer}>
+              {['Tıbbi Yardım', 'Enkaz Kurtarma', 'Erzak', 'Diğer'].map((type) => (
+                <TouchableOpacity
+                  key={type}
+                  style={[styles.typeBtn, aidType === type && styles.typeBtnActive]}
+                  onPress={() => setAidType(type)}
+                >
+                  <Text style={[styles.typeBtnText, aidType === type && styles.typeBtnTextActive]}>{type}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            <TextInput
+              style={[styles.input, styles.textArea]}
+              placeholder="Lütfen durumu detaylı açıklayın (Yaralı sayısı, aciliyet vb.)"
+              placeholderTextColor="#94A3B8"
+              value={aidDesc}
+              onChangeText={setAidDesc}
+              multiline
+            />
+
+            <TouchableOpacity style={styles.submitBtn} onPress={handleAidRequest}>
+              <Text style={styles.submitBtnText}>Yardım Çağrısı Gönder</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity style={styles.cancelBtn} onPress={() => setShowAidModal(false)}>
+              <Text style={styles.cancelBtnText}>İptal</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+    </ScrollView>
   );
 }
 
@@ -618,4 +904,156 @@ const styles = StyleSheet.create({
   fabIcon: {
     fontSize: 28,
   },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center',
+    padding: 20,
+  },
+  modalContent: {
+    backgroundColor: '#FFF',
+    borderRadius: 16,
+    padding: 24,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.1,
+    shadowRadius: 10,
+    elevation: 10,
+  },
+  modalTitle: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    marginBottom: 20,
+    color: '#1E293B',
+    textAlign: 'center',
+  },
+  label: {
+    fontSize: 14,
+    fontWeight: 'bold',
+    color: '#475569',
+    marginBottom: 8,
+    marginTop: 10,
+  },
+  input: {
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    borderRadius: 8,
+    padding: 12,
+    fontSize: 15,
+    marginBottom: 12,
+    color: '#1E293B',
+  },
+  textArea: {
+    height: 100,
+    textAlignVertical: 'top',
+  },
+  typeContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginBottom: 16,
+  },
+  typeBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 20,
+    backgroundColor: '#F1F5F9',
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+  },
+  typeBtnActive: {
+    backgroundColor: '#EFF6FF',
+    borderColor: '#3B82F6',
+  },
+  typeBtnText: {
+    fontSize: 13,
+    color: '#475569',
+  },
+  typeBtnTextActive: {
+    color: '#3B82F6',
+    fontWeight: 'bold',
+  },
+  submitBtn: {
+    backgroundColor: '#EF4444',
+    paddingVertical: 14,
+    borderRadius: 8,
+    alignItems: 'center',
+    marginTop: 10,
+  },
+  submitBtnText: {
+    color: '#FFF',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  cancelBtn: {
+    marginTop: 12,
+    alignItems: 'center',
+    paddingVertical: 8,
+  },
+  cancelBtnText: {
+    color: '#64748B',
+    fontSize: 14,
+    fontWeight: 'bold',
+  },
+  hazardCard: {
+    backgroundColor: '#FFF',
+    width: 280,
+    padding: 16,
+    borderRadius: 12,
+    marginRight: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  hazardHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  hazardTitle: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#F59E0B',
+  },
+  hazardVotes: {
+    fontSize: 12,
+    color: '#64748B',
+    fontWeight: 'bold',
+  },
+  hazardImage: {
+    width: '100%',
+    height: 120,
+    borderRadius: 8,
+    marginBottom: 8,
+  },
+  hazardDescText: {
+    fontSize: 14,
+    color: '#334155',
+    marginBottom: 12,
+  },
+  voteContainer: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  voteBtn: {
+    flex: 1,
+    paddingVertical: 8,
+    borderRadius: 6,
+    alignItems: 'center',
+  },
+  voteUpBtn: {
+    backgroundColor: '#10B981',
+  },
+  voteDownBtn: {
+    backgroundColor: '#EF4444',
+  },
+  voteBtnText: {
+    color: '#FFF',
+    fontSize: 12,
+    fontWeight: 'bold',
+  }
 });

@@ -1,6 +1,6 @@
 import * as Network from 'expo-network';
 import { supabase } from './supabase';
-import { getPendingMessages, markMessageAsSynced, getPendingEmergencyReports, markEmergencyReportAsSynced } from './db';
+import { getPendingMessages, markMessageAsSynced, getPendingEmergencyReports, markEmergencyReportAsSynced, getPendingAidRequests, markAidRequestAsSynced, getPendingHazardReports, markHazardReportAsSynced } from './db';
 
 /**
  * Cihazın anlık internet bağlantısını kontrol eder.
@@ -11,7 +11,7 @@ export const checkInternetConnection = async (): Promise<boolean> => {
     // 3 saniye timeout ile ağ durumunu kontrol et
     const networkPromise = Network.getNetworkStateAsync();
     const timeoutPromise = new Promise<any>((_, reject) => setTimeout(() => reject(new Error('timeout')), 3000));
-    
+
     const networkState = await Promise.race([networkPromise, timeoutPromise]);
     return !!networkState.isConnected && !!networkState.isInternetReachable;
   } catch (error) {
@@ -30,7 +30,7 @@ export const syncPendingMessages = async () => {
 
   try {
     const pendingMessages: any[] = await getPendingMessages();
-    
+
     if (pendingMessages.length === 0) return;
 
     console.log(`${pendingMessages.length} adet bekleyen mesaj senkronize ediliyor...`);
@@ -41,7 +41,7 @@ export const syncPendingMessages = async () => {
       // Şimdilik null veya PostGIS raw formata uygun şekilde göndermemiz gerekiyor. Supabase'de PostGIS için st_point vs kullanmak gerek.
       // Basitlik adına burada text olarak veya Supabase fonksiyonu kullanarak ekleyebiliriz.
       // Eger Supabase direkt EWKT alıyorsa `SRID=4326;POINT(${longitude} ${latitude})` formatında atabiliriz.
-      
+
       let locationData = null;
       if (msg.longitude !== null && msg.latitude !== null) {
         locationData = `SRID=4326;POINT(${msg.longitude} ${msg.latitude})`;
@@ -78,7 +78,7 @@ export const syncPendingEmergencyReports = async () => {
 
   try {
     const pendingReports: any[] = await getPendingEmergencyReports();
-    
+
     if (pendingReports.length === 0) return;
 
     for (const report of pendingReports) {
@@ -107,5 +107,86 @@ export const syncPendingEmergencyReports = async () => {
     }
   } catch (error) {
     console.log("Acil durum raporu senkronizasyonu sırasında hata oluştu (offline):", error instanceof Error ? error.message : error);
+  }
+};
+
+export const syncPendingAidRequests = async () => {
+  const isOnline = await checkInternetConnection();
+  if (!isOnline) return;
+
+  try {
+    const pendingRequests: any[] = await getPendingAidRequests();
+    
+    if (pendingRequests.length === 0) return;
+
+    for (const req of pendingRequests) {
+      let locationData = null;
+      if (req.longitude !== null && req.latitude !== null) {
+        locationData = `SRID=4326;POINT(${req.longitude} ${req.latitude})`;
+      }
+
+      const { error } = await supabase.from('aid_requests').insert({
+        id: req.id,
+        user_id: req.user_id,
+        full_name: req.full_name,
+        type: req.type,
+        category: req.category,
+        description: req.description,
+        status: 'synced',
+        latitude: req.latitude,
+        longitude: req.longitude,
+        location: locationData,
+        created_at: req.created_at
+      });
+
+      if (!error) {
+        await markAidRequestAsSynced(req.id);
+      } else {
+        console.log("Yardım çağrısı senkronizasyon hatası (offline):", error);
+      }
+    }
+  } catch (error) {
+    console.log("Yardım çağrısı senkronizasyonu sırasında hata oluştu (offline):", error instanceof Error ? error.message : error);
+  }
+};
+
+export const syncPendingHazardReports = async () => {
+  const isOnline = await checkInternetConnection();
+  if (!isOnline) return;
+
+  try {
+    const pendingReports: any[] = await getPendingHazardReports();
+    
+    if (pendingReports.length === 0) return;
+
+    for (const report of pendingReports) {
+      let locationData = null;
+      if (report.longitude !== null && report.latitude !== null) {
+        locationData = `SRID=4326;POINT(${report.longitude} ${report.latitude})`;
+      }
+
+      const { error } = await supabase.from('hazard_reports').insert({
+        id: report.id,
+        user_id: report.user_id,
+        hazard_type: report.hazard_type,
+        description: report.description,
+        location: locationData,
+        lat: report.latitude,
+        lon: report.longitude,
+        image_uri: report.image_uri,
+        upvotes: report.upvotes,
+        downvotes: report.downvotes,
+        status: 'synced',
+        created_at: report.created_at
+      });
+
+      if (!error) {
+        await markHazardReportAsSynced(report.id);
+      } else {
+        console.log("Tehlike raporu senkronizasyon hatası (offline):", error);
+      }
+    }
+  } catch (error) {
+    console.log("Tehlike raporu senkronizasyonu sırasında hata oluştu (offline):", error instanceof Error ? error.message : error);
   }
 };
