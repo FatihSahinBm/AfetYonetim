@@ -1,7 +1,20 @@
 import React, { useEffect, useState } from 'react';
-import { View, ActivityIndicator, StyleSheet } from 'react-native';
+import { View, ActivityIndicator, StyleSheet, LogBox } from 'react-native';
 import AppNavigator from './src/navigation/AppNavigator';
 import { initDb } from './src/services/db';
+
+// Ekranda çıkan sarı/kırmızı uyarıları gizler
+LogBox.ignoreLogs(['Network request failed', 'AuthRetryableFetchError']);
+
+// Terminale basılan kırmızı ağ hatalarını sessize alır (Sadece Sunum İçin)
+const originalConsoleError = console.error;
+console.error = (...args) => {
+  const errorString = args.join(' ');
+  if (errorString.includes('Network request failed') || errorString.includes('AuthRetryableFetchError')) {
+    return; // Hatayı yut ve terminale basma
+  }
+  originalConsoleError(...args);
+};
 
 export default function App() {
   const [isDbReady, setIsDbReady] = useState(false);

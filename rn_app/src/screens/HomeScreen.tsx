@@ -28,7 +28,6 @@ export default function HomeScreen({ navigation }: Props) {
   const [gatheringPoints, setGatheringPoints] = useState<any[]>([]);
   const [sirenPlaying, setSirenPlaying] = useState<boolean>(false);
   const [sound, setSound] = useState<Audio.Sound | null>(null);
-  const [pressure, setPressure] = useState<number>(0);
   const [floodRisk, setFloodRisk] = useState<{level: 'LOW' | 'HIGH', rain: number, capacity: number} | null>(null);
   const [quakeRisk, setQuakeRisk] = useState<{level: 'LOW' | 'MEDIUM' | 'HIGH', distance: number, ground: string} | null>(null);
 
@@ -69,29 +68,6 @@ export default function HomeScreen({ navigation }: Props) {
       });
     };
     calculateQuakeRisk();
-  }, []);
-
-  // Barometre / Çevre Sensörü Kontrolü
-  useEffect(() => {
-    if (Platform.OS === 'web') return;
-    
-    let subscription: any = null;
-    const startBarometer = async () => {
-      try {
-        const isAvailable = await Barometer.isAvailableAsync();
-        if (isAvailable) {
-          Barometer.setUpdateInterval(2000); // 2 saniyede bir
-          subscription = Barometer.addListener(({ pressure }) => {
-            setPressure(pressure);
-          });
-        }
-      } catch (e) {}
-    };
-    startBarometer();
-
-    return () => {
-      if (subscription) subscription.remove();
-    };
   }, []);
 
   // Batarya seviye kontrolü
@@ -136,14 +112,28 @@ export default function HomeScreen({ navigation }: Props) {
       Vibration.cancel();
       setSirenPlaying(false);
     } else {
+      // Titreşimi başlat
       Vibration.vibrate([500, 500, 500], true);
       
       try {
-        // Online veya offline çalınabilecek bir ses dosyası için require ile asset eklenebilir, şimdilik titreşim
-        Alert.alert('Siren', 'Yüksek sesli siren ve titreşim aktifleştirildi. Kapatmak için tekrar dokunun.');
+        // Önceden izinleri veya ses ayarlarını kontrol edelim
+        await Audio.setAudioModeAsync({
+          playsInSilentModeIOS: true,
+          staysActiveInBackground: true,
+          shouldDuckAndroid: true,
+        });
+
+        // Siren mp3'ünü çal
+        const { sound: newSound } = await Audio.Sound.createAsync(
+          require('../../assets/siren.mp3'),
+          { shouldPlay: true, isLooping: true, volume: 1.0 }
+        );
+        setSound(newSound);
         setSirenPlaying(true);
       } catch (err) {
         console.error('Siren çalınamadı:', err);
+        // Ses dosyası bulunamazsa bile alarm titreşimi devam etsin
+        setSirenPlaying(true);
       }
     }
   };
@@ -191,7 +181,7 @@ export default function HomeScreen({ navigation }: Props) {
       }
       await loadGatheringPointsFromLocal();
     } catch (e) {
-      console.error(e);
+      console.log('Supabase fetch failed (probably offline):', e instanceof Error ? e.message : e);
       await loadGatheringPointsFromLocal();
     }
   };
@@ -333,16 +323,6 @@ export default function HomeScreen({ navigation }: Props) {
         >
           <Text style={styles.actionBtnText}>{sirenPlaying ? 'SİRENİ KAPAT' : 'SİREN ÇAL'}</Text>
         </TouchableOpacity>
-      </View>
-
-      <View style={styles.sensorContainer}>
-        <Text style={styles.sensorTitle}>Çevre Sensörü (Basınç / Enkaz Durumu)</Text>
-        <Text style={styles.sensorValue}>
-          {pressure > 0 ? `${pressure.toFixed(2)} hPa` : 'Ölçülüyor...'}
-        </Text>
-        <Text style={styles.sensorHint}>
-          *Ani basınç değişimleri yapısal çöküntü veya enkaz durumunu gösterebilir.
-        </Text>
       </View>
 
       {/* Yapay Zeka Yağış ve Sel Analizi */}

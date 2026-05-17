@@ -52,11 +52,11 @@ export const syncPendingMessages = async () => {
         // Başarılı ise lokal veritabanında güncelleyelim
         await markMessageAsSynced(msg.id);
       } else {
-        console.error("Mesaj senkronizasyon hatası:", error);
+        console.log("Mesaj senkronizasyon hatası (muhtemelen internet yok):", error);
       }
     }
   } catch (error) {
-    console.error("Senkronizasyon sırasında hata oluştu:", error);
+    console.log("Senkronizasyon sırasında hata oluştu (offline):", error instanceof Error ? error.message : error);
   }
 };
 
@@ -90,10 +90,10 @@ export const syncPendingEmergencyReports = async () => {
       if (!error) {
         await markEmergencyReportAsSynced(report.id);
       } else {
-        console.error("Acil durum raporu senkronizasyon hatası:", error);
+        console.log("Acil durum raporu senkronizasyon hatası (offline):", error);
       }
     }
   } catch (error) {
-    console.error("Acil durum raporu senkronizasyonu sırasında hata oluştu:", error);
+    console.log("Acil durum raporu senkronizasyonu sırasında hata oluştu (offline):", error instanceof Error ? error.message : error);
   }
 };

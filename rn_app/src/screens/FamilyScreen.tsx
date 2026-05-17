@@ -6,17 +6,17 @@ import { checkInternetConnection } from '../services/syncService';
 
 export default function FamilyScreen() {
   const [members, setMembers] = useState<any[]>([]);
-  const [pendingInvites, setPendingInvites] = useState<any[]>([]);
-  const [newEmail, setNewEmail] = useState('');
+  const [joinCode, setJoinCode] = useState('');
   const [loading, setLoading] = useState(false);
   const [currentUser, setCurrentUser] = useState<any>(null);
   const [isOnline, setIsOnline] = useState(true);
+  const [myHouseholdCode, setMyHouseholdCode] = useState<string | null>(null);
 
   useEffect(() => {
-    supabase.auth.getUser().then(({ data: { user } }) => {
-      if (user) {
-        setCurrentUser(user);
-        loadData(user);
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (session?.user) {
+        setCurrentUser(session.user);
+        loadData(session.user);
       }
     });
   }, []);
@@ -28,7 +28,6 @@ export default function FamilyScreen() {
     setIsOnline(online);
 
     if (!online) {
-      // Çevrimdışı modda yerel SQLite veritabanından getir
       const cached = await getCachedHouseholdMembers();
       setMembers(cached);
       setLoading(false);
@@ -36,83 +35,54 @@ export default function FamilyScreen() {
     }
 
     try {
-      // Çevrimiçi Mod
-      // 1. Kullanıcının mevcut hanesi var mı kontrol et, yoksa "Benim Hanem" oluştur
-      const { data: myHouseholds } = await supabase
-        .from('household_members')
-        .select('household_id, status')
-        .eq('user_id', userId);
+      // Güvenlik: Kullanıcının profil kaydını garantiye al
+      await supabase.from('profiles').upsert({
+        id: userObj.id,
+        email: userObj.email,
+        last_active_at: new Date().toISOString()
+      }, { onConflict: 'id' });
 
-      let primaryHouseholdId = null;
-
-      if (!myHouseholds || myHouseholds.length === 0) {
-        // Güvenlik: Kullanıcının 'profiles' tablosunda kaydı olduğundan emin olalım
-        // Aksi takdirde foreign_key kısıtlamasından dolayı household_members insert işlemi sessizce başarısız olur.
-        await supabase.from('profiles').upsert({
-          id: userObj.id,
-          email: userObj.email,
-          last_active_at: new Date().toISOString()
-        }, { onConflict: 'id' });
-
-        const generatedHouseholdId = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
-          var r = Math.random() * 16 | 0, v = c === 'x' ? r : (r & 0x3 | 0x8);
-          return v.toString(16);
-        });
-
-        const { error: houseError } = await supabase.from('households').insert({ 
-          id: generatedHouseholdId, 
-          name: 'Benim Hanem' 
-        });
-
-        if (!houseError) {
-          const { error: memberError } = await supabase.from('household_members').insert({
-            household_id: generatedHouseholdId,
-            user_id: userId,
-            role: 'admin',
-            status: 'accepted'
-          });
-
-          if (memberError) {
-            console.error("Hane üyesi olarak eklenemedi:", memberError);
-            Alert.alert("Veritabanı Hatası", "Hane üyesi oluşturulurken hata oluştu: " + memberError.message);
-          } else {
-            primaryHouseholdId = generatedHouseholdId;
-          }
-        } else {
-          console.error("Hane oluşturulamadı:", houseError);
-          Alert.alert("Veritabanı Hatası", "Hane oluşturulamadı: " + houseError.message);
-        }
-      } else {
-        const accepted = myHouseholds.find((h: any) => h.status === 'accepted');
-        if (accepted) primaryHouseholdId = accepted.household_id;
-      }
-
-      // 2. Bana Gelen Bekleyen Davetleri (Handshake) getir
-      const { data: invites } = await supabase
+      // 1. Kullanıcının mevcut hanesi var mı kontrol et
+      const { data: myHouseholds, error: hError } = await supabase
         .from('household_members')
         .select(`
-          id, household_id, role,
+          household_id, 
+          status,
           households:household_id (name)
         `)
         .eq('user_id', userId)
-        .eq('status', 'pending');
-      
-      setPendingInvites(invites || []);
+        .eq('status', 'accepted')
+        .limit(1);
 
-      // 3. Hanemdeki kabul edilmiş (accepted) üyeleri getir
-      if (!primaryHouseholdId) {
+      if (hError) {
+         console.log("Hane fetch hatası:", hError);
+      }
+
+      let primaryHouseholdId = null;
+
+      if (myHouseholds && myHouseholds.length > 0) {
+        const firstHousehold = myHouseholds[0];
+        primaryHouseholdId = firstHousehold.household_id;
+        const hName = Array.isArray(firstHousehold.households) ? firstHousehold.households[0]?.name : firstHousehold.households?.name;
+        if (hName && hName.startsWith('Aile-')) {
+          setMyHouseholdCode(hName.replace('Aile-', ''));
+        }
+      } else {
+        setMyHouseholdCode(null);
         setMembers([]);
         setLoading(false);
         return;
       }
 
+      // 2. Hanemdeki kabul edilmiş (accepted) üyeleri getir
       const { data: allMembers } = await supabase
         .from('household_members')
         .select(`
           id, user_id, role, status, 
           profiles:user_id (email, full_name, last_active_at)
         `)
-        .eq('household_id', primaryHouseholdId);
+        .eq('household_id', primaryHouseholdId)
+        .eq('status', 'accepted');
 
       if (!allMembers) {
         setMembers([]);
@@ -126,38 +96,31 @@ export default function FamilyScreen() {
         if (!profile) continue;
 
         let statusColorText = '⚪ Bilinmiyor';
-        let isZombie = false;
         let lastReportTime = 'Kayıt Yok';
 
         // Zombi kontrolü
         const lastDate = new Date(profile.last_active_at);
         const hoursPassed = (new Date().getTime() - lastDate.getTime()) / (1000 * 60 * 60);
         if (hoursPassed > 48) {
-          isZombie = true;
           statusColorText = '⚪ Bilinmiyor (Zombi)';
         }
 
-        // Eğer henüz daveti kabul etmediyse
-        if (m.status === 'pending') {
-          statusColorText = '⏳ Davet Onayı Bekleniyor';
-        } else {
-          // Son acil durum raporunu getir (Trafik Lambası Mantığı) - Sadece accepted olanlar için
-          const { data: reportData } = await supabase
-            .from('emergency_reports')
-            .select('status_type, created_at')
-            .eq('user_id', m.user_id)
-            .order('created_at', { ascending: false })
-            .limit(1)
-            .single();
+        // Son acil durum raporunu getir (Trafik Lambası Mantığı)
+        const { data: reportData } = await supabase
+          .from('emergency_reports')
+          .select('status_type, created_at')
+          .eq('user_id', m.user_id)
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .single();
 
-          if (reportData) {
-             lastReportTime = new Date(reportData.created_at).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' });
-             if (reportData.status_type === 'SAFE') {
-                statusColorText = '🟢 Güvende';
-             } else if (reportData.status_type === 'TRAPPED') {
-                statusColorText = '🔴 Tehlikede / Yardım Bekliyor';
-             }
-          }
+        if (reportData) {
+            lastReportTime = new Date(reportData.created_at).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' });
+            if (reportData.status_type === 'SAFE') {
+              statusColorText = '🟢 Güvende';
+            } else if (reportData.status_type === 'TRAPPED') {
+              statusColorText = '🔴 Tehlikede / Yardım Bekliyor';
+            }
         }
 
         enhancedMembers.push({
@@ -175,8 +138,6 @@ export default function FamilyScreen() {
       }
 
       setMembers(enhancedMembers);
-      
-      // Çevrimdışı (Offline-First) stratejisi için verileri SQLite'a kaydet
       await cacheHouseholdMembers(enhancedMembers);
 
     } catch (err) {
@@ -185,73 +146,138 @@ export default function FamilyScreen() {
     setLoading(false);
   };
 
-  const handleAcceptInvite = async (inviteId: string) => {
+  const createFamily = async () => {
+    let activeUser = currentUser;
+    if (!activeUser) {
+      // Çevrimdışı/açılış anlık durumlarda currentUser state'e düşmemiş olabilir, doğrudan auth'tan çekmeyi deneyelim
+      const { data } = await supabase.auth.getSession();
+      if (data.session?.user) {
+        setCurrentUser(data.session.user);
+        activeUser = data.session.user;
+      } else {
+        Alert.alert('Oturum Hatası', 'Kullanıcı oturumunuz doğrulanamadı. Lütfen giriş ekranına dönüp tekrar giriş yapın.');
+        return;
+      }
+    }
+
+    if (!isOnline) {
+      Alert.alert('Çevrimdışı', 'Aile oluşturmak için internet bağlantısı gereklidir.');
+      return;
+    }
+    
     setLoading(true);
-    await supabase.from('household_members').update({ status: 'accepted' }).eq('id', inviteId);
-    await loadData(currentUser);
+    
+    try {
+      // 6 haneli eşsiz kod üret (Sunucuda da UNIQUE kontrolü yapacağız)
+      const code = Math.random().toString(36).substring(2, 8).toUpperCase();
+      const generatedHouseholdId = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+        var r = Math.random() * 16 | 0, v = c === 'x' ? r : (r & 0x3 | 0x8);
+        return v.toString(16);
+      });
+
+      const { error: houseError } = await supabase.from('households').insert({ 
+        id: generatedHouseholdId, 
+        name: `Aile-${code}` 
+      });
+
+      if (!houseError) {
+        const { error: memberError } = await supabase.from('household_members').insert({
+          household_id: generatedHouseholdId,
+          user_id: activeUser.id,
+          role: 'admin',
+          status: 'accepted'
+        });
+        
+        if (memberError) {
+           Alert.alert('Hata', 'Aile oluşturuldu ancak sizi eklerken bir sorun oluştu.');
+        } else {
+           await loadData(activeUser);
+        }
+      } else {
+        Alert.alert('Hata', 'Aile oluşturulamadı: ' + houseError.message);
+      }
+    } catch (e: any) {
+      console.log('Aile oluşturulurken hata:', e);
+      Alert.alert('Hata', 'İşlem sırasında beklenmeyen bir sorun oluştu: ' + (e?.message || 'Bağlantı kopukluğu'));
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const inviteMember = async () => {
-    if (!newEmail || !currentUser) return;
+  const joinFamily = async () => {
+    if (!joinCode) return;
+    
+    let activeUser = currentUser;
+    if (!activeUser) {
+      const { data } = await supabase.auth.getSession();
+      if (data.session?.user) {
+        setCurrentUser(data.session.user);
+        activeUser = data.session.user;
+      } else {
+        Alert.alert('Oturum Hatası', 'Kullanıcı oturumunuz bulunamadı.');
+        return;
+      }
+    }
+
+    if (!isOnline) {
+      Alert.alert('Çevrimdışı', 'Aileye katılmak için internet bağlantısı gereklidir.');
+      return;
+    }
+
     setLoading(true);
 
-    // 1. Admin olduğum haneyi bul
-    const { data: myHouseholds } = await supabase
-      .from('household_members')
-      .select('household_id')
-      .eq('user_id', currentUser.id)
-      .eq('status', 'accepted')
-      .limit(1)
-      .single();
+    try {
+      const codeToSearch = `Aile-${joinCode.toUpperCase().trim()}`;
+      const { data: house, error: findError } = await supabase
+        .from('households')
+        .select('id')
+        .eq('name', codeToSearch)
+        .single();
 
-    if (!myHouseholds) {
-      Alert.alert('Hata', 'Hane bilginiz bulunamadı.');
+      if (!house) {
+        Alert.alert('Hata', 'Bu koda sahip bir aile bulunamadı. Lütfen kodu doğru girdiğinizden emin olun.');
+        setLoading(false);
+        return;
+      }
+
+      const { error } = await supabase.from('household_members').insert({
+        household_id: house.id,
+        user_id: currentUser.id,
+        role: 'member',
+        status: 'accepted'
+      });
+
+      if (error) {
+        Alert.alert('Hata', 'Aileye katılırken bir hata oluştu. Veritabanı güvenlik (RLS) kuralını güncellediğinizden emin olun veya zaten bu ailede olabilirsiniz.');
+      } else {
+        setJoinCode('');
+        await loadData(currentUser);
+      }
+    } catch (e) {
+      console.log('Aileye katılırken hata:', e);
+      Alert.alert('Hata', 'Bağlantı sorunu veya yetki hatası oluştu. (Supabase RLS kuralını güncellediğinizden emin olun)');
+    } finally {
       setLoading(false);
-      return;
     }
+  };
 
-    // 2. Davet edilecek e-posta sistemde var mı bul
-    const emailToSearch = newEmail.trim().toLowerCase();
-    const { data: targetProfile } = await supabase
-      .from('profiles')
-      .select('id')
-      .eq('email', emailToSearch)
-      .single();
-
-    if (!targetProfile) {
-      Alert.alert('Hata', `"${emailToSearch}" adresine sahip bir kullanıcı bulunamadı.\n\nDavet edeceğiniz kişinin önce bu uygulamayı indirip aynı e-posta ile kayıt olması ve giriş yapması gerekmektedir.`);
-      setLoading(false);
-      return;
-    }
-
-    if (targetProfile.id === currentUser.id) {
-      Alert.alert('Hata', 'Kendinizi davet edemezsiniz.');
-      setLoading(false);
-      return;
-    }
-
-    // 3. Daveti (pending state) yolla
-    const { error } = await supabase.from('household_members').insert({
-      household_id: myHouseholds.household_id,
-      user_id: targetProfile.id,
-      role: 'member',
-      status: 'pending' // Çift Taraflı Onay Sistemi
-    });
-
-    if (error) {
-      Alert.alert('Hata', 'Davet gönderilemedi. Zaten hanenizde veya davet edilmiş olabilir.');
-    } else {
-      setNewEmail('');
-      await loadData(currentUser); // Listeyi anında yenile
-    }
-    setLoading(false);
+  const leaveFamily = async () => {
+    if (!currentUser) return;
+    Alert.alert('Aileden Ayrıl', 'Emin misiniz?', [
+      { text: 'İptal', style: 'cancel' },
+      { text: 'Ayrıl', style: 'destructive', onPress: async () => {
+          setLoading(true);
+          await supabase.from('household_members').delete().eq('user_id', currentUser.id);
+          await loadData(currentUser);
+        }
+      }
+    ]);
   };
 
   const renderMember = ({ item }: { item: any }) => {
     let bgColor = '#F1F5F9';
     let borderColor = '#E2E8F0';
     
-    // Trafik Lambası UI renk kodlaması
     if (item.last_report_status.includes('🟢')) {
       bgColor = '#ECFDF5';
       borderColor = '#10B981';
@@ -275,19 +301,6 @@ export default function FamilyScreen() {
     );
   };
 
-  const renderInvite = ({ item }: { item: any }) => {
-    // Array gelirse güvenliği için ilk elemanı al
-    const hName = Array.isArray(item.households) ? item.households[0]?.name : item.households?.name;
-    return (
-      <View style={styles.inviteCard}>
-        <Text style={styles.inviteText}><Text style={{fontWeight: 'bold'}}>{hName || 'Bir Hane'}</Text> sizi davet ediyor.</Text>
-        <TouchableOpacity style={styles.acceptButton} onPress={() => handleAcceptInvite(item.id)}>
-          <Text style={styles.acceptButtonText}>Kabul Et</Text>
-        </TouchableOpacity>
-      </View>
-    );
-  };
-
   return (
     <ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 40 }}>
       
@@ -297,55 +310,67 @@ export default function FamilyScreen() {
         </View>
       )}
 
-      {/* Gelen Davetler (Eğer varsa) */}
-      {isOnline && pendingInvites.length > 0 && (
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Bekleyen Davetler ({pendingInvites.length})</Text>
-          <FlatList
-            data={pendingInvites}
-            keyExtractor={(item) => item.id}
-            renderItem={renderInvite}
-            scrollEnabled={false}
-          />
+      {!myHouseholdCode && !loading && (
+        <View style={styles.setupContainer}>
+          <Text style={styles.setupTitle}>Ailenizle Bağlantıda Kalın</Text>
+          <Text style={styles.setupDesc}>Afet anında ailenizin durumunu (Güvende / Tehlikede) anlık olarak görebilmek için bir aile ağı oluşturun veya mevcut ağa katılın.</Text>
+          
+          <TouchableOpacity style={styles.createBtn} onPress={createFamily}>
+            <Text style={styles.createBtnText}>Yeni Aile Oluştur</Text>
+          </TouchableOpacity>
+
+          <View style={styles.divider}>
+            <View style={styles.dividerLine} />
+            <Text style={styles.dividerText}>VEYA</Text>
+            <View style={styles.dividerLine} />
+          </View>
+
+          <View style={styles.joinContainer}>
+            <TextInput
+              style={styles.joinInput}
+              placeholder="6 Haneli Aile Kodu"
+              autoCapitalize="characters"
+              maxLength={6}
+              value={joinCode}
+              onChangeText={setJoinCode}
+            />
+            <TouchableOpacity style={styles.joinBtn} onPress={joinFamily}>
+              <Text style={styles.joinBtnText}>Koda Katıl</Text>
+            </TouchableOpacity>
+          </View>
         </View>
       )}
 
-      {/* Davet Gönderme Formu (Sadece Online iken) */}
-      {isOnline && (
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Haneye Birini Davet Et</Text>
-          <View style={styles.inputRow}>
-            <TextInput
-              style={styles.input}
-              placeholder="Davet edilecek e-posta"
-              keyboardType="email-address"
-              autoCapitalize="none"
-              value={newEmail}
-              onChangeText={setNewEmail}
-            />
-            <TouchableOpacity style={styles.addButton} onPress={inviteMember}>
-              <Text style={styles.addButtonText}>Gönder</Text>
-            </TouchableOpacity>
-          </View>
-          <Text style={styles.hint}>Kişi e-postanız üzerinden bildirim alır ve onayladığında verilerini görebilirsiniz. (Mahremiyet Koruması)</Text>
+      {myHouseholdCode && (
+        <View style={styles.codeSection}>
+          <Text style={styles.codeTitle}>Ailenizin Davet Kodu</Text>
+          <Text style={styles.codeValue}>{myHouseholdCode}</Text>
+          <Text style={styles.codeHint}>Bu kodu aile bireylerinize göndererek ağınıza katılmalarını sağlayabilirsiniz.</Text>
+          
+          <TouchableOpacity style={styles.leaveBtn} onPress={leaveFamily}>
+            <Text style={styles.leaveBtnText}>Ağdan Ayrıl</Text>
+          </TouchableOpacity>
         </View>
       )}
 
       {/* Kriz Merkezi / Hane Üyeleri */}
-      <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Hane Durum Merkezi (Trafik Lambası)</Text>
-        {loading && members.length === 0 ? (
-          <ActivityIndicator size="large" color="#3B82F6" style={{ marginTop: 20 }} />
-        ) : (
-          <FlatList
-            data={members}
-            keyExtractor={(item) => item.id}
-            renderItem={renderMember}
-            scrollEnabled={false}
-            ListEmptyComponent={<Text style={styles.emptyText}>Hanenizde kimse yok.</Text>}
-          />
-        )}
-      </View>
+      {myHouseholdCode && (
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Hane Durum Merkezi (Trafik Lambası)</Text>
+          {loading && members.length === 0 ? (
+            <ActivityIndicator size="large" color="#3B82F6" style={{ marginTop: 20 }} />
+          ) : (
+            <FlatList
+              data={members}
+              keyExtractor={(item) => item.id}
+              renderItem={renderMember}
+              scrollEnabled={false}
+              ListEmptyComponent={<Text style={styles.emptyText}>Hanenizde kimse yok.</Text>}
+            />
+          )}
+        </View>
+      )}
+
     </ScrollView>
   );
 }
@@ -368,6 +393,128 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     textAlign: 'center',
   },
+  setupContainer: {
+    backgroundColor: '#FFF',
+    padding: 24,
+    borderRadius: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.1,
+    shadowRadius: 12,
+    elevation: 4,
+    alignItems: 'center',
+    marginTop: 20,
+  },
+  setupTitle: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    color: '#1E293B',
+    marginBottom: 8,
+  },
+  setupDesc: {
+    fontSize: 14,
+    color: '#64748B',
+    textAlign: 'center',
+    marginBottom: 24,
+    lineHeight: 20,
+  },
+  createBtn: {
+    backgroundColor: '#8B5CF6',
+    paddingVertical: 14,
+    paddingHorizontal: 24,
+    borderRadius: 12,
+    width: '100%',
+    alignItems: 'center',
+  },
+  createBtnText: {
+    color: '#FFF',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  divider: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    width: '100%',
+    marginVertical: 24,
+  },
+  dividerLine: {
+    flex: 1,
+    height: 1,
+    backgroundColor: '#E2E8F0',
+  },
+  dividerText: {
+    color: '#94A3B8',
+    paddingHorizontal: 12,
+    fontSize: 12,
+    fontWeight: 'bold',
+  },
+  joinContainer: {
+    flexDirection: 'row',
+    width: '100%',
+    gap: 12,
+  },
+  joinInput: {
+    flex: 1,
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+    borderRadius: 12,
+    paddingHorizontal: 16,
+    fontSize: 18,
+    fontWeight: 'bold',
+    textAlign: 'center',
+    letterSpacing: 2,
+  },
+  joinBtn: {
+    backgroundColor: '#10B981',
+    justifyContent: 'center',
+    paddingHorizontal: 20,
+    borderRadius: 12,
+  },
+  joinBtnText: {
+    color: '#FFF',
+    fontWeight: 'bold',
+    fontSize: 16,
+  },
+  codeSection: {
+    backgroundColor: '#FFFBEB',
+    padding: 20,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#FDE68A',
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  codeTitle: {
+    fontSize: 14,
+    color: '#92400E',
+    fontWeight: 'bold',
+    marginBottom: 8,
+  },
+  codeValue: {
+    fontSize: 32,
+    fontWeight: '900',
+    color: '#B45309',
+    letterSpacing: 6,
+    marginBottom: 8,
+  },
+  codeHint: {
+    fontSize: 12,
+    color: '#D97706',
+    textAlign: 'center',
+    marginBottom: 16,
+  },
+  leaveBtn: {
+    backgroundColor: '#FEE2E2',
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+  },
+  leaveBtnText: {
+    color: '#EF4444',
+    fontWeight: 'bold',
+    fontSize: 12,
+  },
   section: {
     backgroundColor: '#FFF',
     padding: 16,
@@ -384,63 +531,6 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     color: '#1E293B',
     marginBottom: 12,
-  },
-  inputRow: {
-    flexDirection: 'row',
-    gap: 8,
-  },
-  input: {
-    flex: 1,
-    backgroundColor: '#F8FAFC',
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    fontSize: 14,
-  },
-  addButton: {
-    backgroundColor: '#3B82F6',
-    paddingHorizontal: 16,
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderRadius: 8,
-  },
-  addButtonText: {
-    color: '#FFF',
-    fontWeight: 'bold',
-  },
-  hint: {
-    fontSize: 11,
-    color: '#64748B',
-    marginTop: 8,
-    lineHeight: 16,
-  },
-  inviteCard: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    backgroundColor: '#FFFBEB',
-    padding: 12,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#FDE68A',
-    marginBottom: 8,
-  },
-  inviteText: {
-    fontSize: 13,
-    color: '#92400E',
-    flex: 1,
-  },
-  acceptButton: {
-    backgroundColor: '#10B981',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 6,
-  },
-  acceptButtonText: {
-    color: '#FFF',
-    fontSize: 12,
-    fontWeight: 'bold',
   },
   memberCard: {
     padding: 16,
