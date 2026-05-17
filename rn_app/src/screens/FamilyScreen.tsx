@@ -1,5 +1,6 @@
-import React, { useEffect, useState } from 'react';
-import { View, Text, StyleSheet, FlatList, TextInput, TouchableOpacity, Alert, ActivityIndicator, ScrollView } from 'react-native';
+import React, { useEffect, useState, useRef } from 'react';
+import { View, Text, StyleSheet, FlatList, TextInput, TouchableOpacity, Alert, ActivityIndicator, ScrollView, Vibration } from 'react-native';
+import { useNavigation } from '@react-navigation/native';
 import { supabase } from '../services/supabase';
 import { cacheHouseholdMembers, getCachedHouseholdMembers } from '../services/db';
 import { checkInternetConnection } from '../services/syncService';
@@ -11,6 +12,12 @@ export default function FamilyScreen() {
   const [currentUser, setCurrentUser] = useState<any>(null);
   const [isOnline, setIsOnline] = useState(true);
   const [myHouseholdCode, setMyHouseholdCode] = useState<string | null>(null);
+  const membersRef = useRef<any[]>([]);
+  const navigation = useNavigation<any>();
+
+  useEffect(() => {
+    membersRef.current = members;
+  }, [members]);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -20,6 +27,49 @@ export default function FamilyScreen() {
       }
     });
   }, []);
+
+  // Gerçek Zamanlı (Realtime) Güncellemeleri Dinle
+  useEffect(() => {
+    if (!currentUser) return;
+
+    const channelName = `family_updates_${currentUser.id}`;
+    const channel = supabase
+      .channel(channelName)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'household_members' },
+        () => {
+          // Aileye biri katıldığında veya ayrıldığında verileri yenile
+          console.log('[Realtime] household_members değişti, veriler güncelleniyor');
+          loadData(currentUser);
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'emergency_reports' },
+        (payload: any) => {
+          // Aileden birinin sağlık/güvenlik durumu değiştiğinde yenile
+          console.log('[Realtime] emergency_reports değişti, veriler güncelleniyor');
+          loadData(currentUser);
+
+          if (payload.eventType === 'INSERT' && payload.new?.status_type === 'TRAPPED') {
+            const trappedUserId = payload.new.user_id;
+            const isFamilyMember = membersRef.current.some(m => m.user_id === trappedUserId && m.user_id !== currentUser.id);
+            
+            if (isFamilyMember) {
+              const memberObj = membersRef.current.find(m => m.user_id === trappedUserId);
+              Vibration.vibrate([1000, 500, 1000, 500, 1000]);
+              Alert.alert('ACİL DURUM!', `Aile üyeniz (${memberObj?.full_name || 'Bilinmiyor'}) az önce MAHSUR KALDIĞINI bildirdi! Lütfen hemen konumunu kontrol edin.`);
+            }
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [currentUser]);
 
   const loadData = async (userObj: any) => {
     setLoading(true);
@@ -108,7 +158,7 @@ export default function FamilyScreen() {
         // Son acil durum raporunu getir (Trafik Lambası Mantığı)
         const { data: reportData } = await supabase
           .from('emergency_reports')
-          .select('status_type, created_at')
+          .select('status_type, created_at, lat, lon')
           .eq('user_id', m.user_id)
           .order('created_at', { ascending: false })
           .limit(1)
@@ -133,7 +183,9 @@ export default function FamilyScreen() {
           status: 'accepted',
           last_active_at: profile.last_active_at,
           last_report_status: statusColorText,
-          last_report_time: lastReportTime
+          last_report_time: lastReportTime,
+          lat: reportData?.lat || null,
+          lon: reportData?.lon || null
         });
       }
 
@@ -147,27 +199,33 @@ export default function FamilyScreen() {
   };
 
   const createFamily = async () => {
-    let activeUser = currentUser;
-    if (!activeUser) {
-      // Çevrimdışı/açılış anlık durumlarda currentUser state'e düşmemiş olabilir, doğrudan auth'tan çekmeyi deneyelim
-      const { data } = await supabase.auth.getSession();
-      if (data.session?.user) {
-        setCurrentUser(data.session.user);
-        activeUser = data.session.user;
-      } else {
-        Alert.alert('Oturum Hatası', 'Kullanıcı oturumunuz doğrulanamadı. Lütfen giriş ekranına dönüp tekrar giriş yapın.');
+    console.log('[createFamily] Başladı');
+    setLoading(true);
+    try {
+      let activeUser = currentUser;
+      if (!activeUser) {
+        console.log('[createFamily] activeUser yok, session çekiliyor');
+        const { data } = await supabase.auth.getSession();
+        if (data.session?.user) {
+          console.log('[createFamily] Session alındı');
+          setCurrentUser(data.session.user);
+          activeUser = data.session.user;
+        } else {
+          console.log('[createFamily] Session bulunamadı');
+          Alert.alert('Oturum Hatası', 'Kullanıcı oturumunuz doğrulanamadı. Lütfen giriş ekranına dönüp tekrar giriş yapın.');
+          setLoading(false);
+          return;
+        }
+      }
+
+      if (!isOnline) {
+        console.log('[createFamily] Çevrimdışı, işlem iptal');
+        Alert.alert('Çevrimdışı', 'Aile oluşturmak için internet bağlantısı gereklidir.');
+        setLoading(false);
         return;
       }
-    }
-
-    if (!isOnline) {
-      Alert.alert('Çevrimdışı', 'Aile oluşturmak için internet bağlantısı gereklidir.');
-      return;
-    }
-    
-    setLoading(true);
-    
-    try {
+      
+      console.log('[createFamily] ID ve Kod üretiliyor');
       // 6 haneli eşsiz kod üret (Sunucuda da UNIQUE kontrolü yapacağız)
       const code = Math.random().toString(36).substring(2, 8).toUpperCase();
       const generatedHouseholdId = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
@@ -175,31 +233,40 @@ export default function FamilyScreen() {
         return v.toString(16);
       });
 
-      const { error: houseError } = await supabase.from('households').insert({ 
+      console.log('[createFamily] households tablosuna ekleniyor:', { generatedHouseholdId, code });
+      const { data: houseData, error: houseError } = await supabase.from('households').insert({ 
         id: generatedHouseholdId, 
         name: `Aile-${code}` 
       });
+      console.log('[createFamily] households tablosuna eklendi, hata durumu:', houseError);
 
       if (!houseError) {
-        const { error: memberError } = await supabase.from('household_members').insert({
+        console.log('[createFamily] household_members tablosuna ekleniyor:', activeUser.id);
+        const { data: memberData, error: memberError } = await supabase.from('household_members').insert({
           household_id: generatedHouseholdId,
           user_id: activeUser.id,
           role: 'admin',
           status: 'accepted'
         });
+        console.log('[createFamily] household_members tablosuna eklendi, hata durumu:', memberError);
         
         if (memberError) {
            Alert.alert('Hata', 'Aile oluşturuldu ancak sizi eklerken bir sorun oluştu.');
         } else {
+           console.log('[createFamily] Başarılı, UI güncelleniyor ve loadData çağrılıyor');
+           setMyHouseholdCode(code);
            await loadData(activeUser);
+           console.log('[createFamily] loadData tamamlandı');
         }
       } else {
+        console.log('[createFamily] households insert hatası:', houseError);
         Alert.alert('Hata', 'Aile oluşturulamadı: ' + houseError.message);
       }
     } catch (e: any) {
-      console.log('Aile oluşturulurken hata:', e);
+      console.log('[createFamily] CATCH BLOGU HATASI:', e);
       Alert.alert('Hata', 'İşlem sırasında beklenmeyen bir sorun oluştu: ' + (e?.message || 'Bağlantı kopukluğu'));
     } finally {
+      console.log('[createFamily] FINALLY blogu, loading false yapılıyor');
       setLoading(false);
     }
   };
@@ -207,26 +274,27 @@ export default function FamilyScreen() {
   const joinFamily = async () => {
     if (!joinCode) return;
     
-    let activeUser = currentUser;
-    if (!activeUser) {
-      const { data } = await supabase.auth.getSession();
-      if (data.session?.user) {
-        setCurrentUser(data.session.user);
-        activeUser = data.session.user;
-      } else {
-        Alert.alert('Oturum Hatası', 'Kullanıcı oturumunuz bulunamadı.');
+    setLoading(true);
+    try {
+      let activeUser = currentUser;
+      if (!activeUser) {
+        const { data } = await supabase.auth.getSession();
+        if (data.session?.user) {
+          setCurrentUser(data.session.user);
+          activeUser = data.session.user;
+        } else {
+          Alert.alert('Oturum Hatası', 'Kullanıcı oturumunuz bulunamadı.');
+          setLoading(false);
+          return;
+        }
+      }
+
+      if (!isOnline) {
+        Alert.alert('Çevrimdışı', 'Aileye katılmak için internet bağlantısı gereklidir.');
+        setLoading(false);
         return;
       }
-    }
 
-    if (!isOnline) {
-      Alert.alert('Çevrimdışı', 'Aileye katılmak için internet bağlantısı gereklidir.');
-      return;
-    }
-
-    setLoading(true);
-
-    try {
       const codeToSearch = `Aile-${joinCode.toUpperCase().trim()}`;
       const { data: house, error: findError } = await supabase
         .from('households')
@@ -250,6 +318,7 @@ export default function FamilyScreen() {
       if (error) {
         Alert.alert('Hata', 'Aileye katılırken bir hata oluştu. Veritabanı güvenlik (RLS) kuralını güncellediğinizden emin olun veya zaten bu ailede olabilirsiniz.');
       } else {
+        setMyHouseholdCode(joinCode.toUpperCase().trim());
         setJoinCode('');
         await loadData(currentUser);
       }
@@ -262,13 +331,90 @@ export default function FamilyScreen() {
   };
 
   const leaveFamily = async () => {
-    if (!currentUser) return;
+    let activeUser = currentUser;
+    if (!activeUser) {
+      const { data } = await supabase.auth.getSession();
+      if (data.session?.user) {
+        setCurrentUser(data.session.user);
+        activeUser = data.session.user;
+      } else {
+        Alert.alert('Hata', 'Kullanıcı oturumu bulunamadı.');
+        return;
+      }
+    }
+
     Alert.alert('Aileden Ayrıl', 'Emin misiniz?', [
       { text: 'İptal', style: 'cancel' },
       { text: 'Ayrıl', style: 'destructive', onPress: async () => {
           setLoading(true);
-          await supabase.from('household_members').delete().eq('user_id', currentUser.id);
-          await loadData(currentUser);
+          try {
+            // Eğer ayrılan kişi admin ise devir işlemini yap
+            const myMember = members.find(m => m.user_id === activeUser.id);
+            if (myMember && myMember.role === 'admin') {
+              // En eski diğer üyeyi bul
+              const { data: oldestMember } = await supabase
+                .from('household_members')
+                .select('id, user_id')
+                .eq('household_id', myMember.household_id)
+                .neq('user_id', activeUser.id)
+                .order('created_at', { ascending: true })
+                .limit(1)
+                .single();
+
+              if (oldestMember) {
+                // Yeni admin yap
+                await supabase.from('household_members').update({ role: 'admin' }).eq('id', oldestMember.id);
+                console.log('[leaveFamily] Adminlik devredildi:', oldestMember.user_id);
+              }
+            }
+
+            const { error } = await supabase.from('household_members').delete().eq('user_id', activeUser.id);
+            if (error) {
+              console.log('Ayrılma hatası:', error);
+              Alert.alert('Hata', 'Ağdan ayrılırken sorun oluştu: ' + error.message);
+            } else {
+              setMyHouseholdCode(null);
+              setMembers([]);
+              await loadData(activeUser);
+            }
+          } catch (e: any) {
+             Alert.alert('Hata', 'Beklenmeyen hata: ' + e.message);
+          } finally {
+             setLoading(false);
+          }
+        }
+      }
+    ]);
+  };
+
+  const kickMember = async (memberUserId: string, memberEmail: string) => {
+    let activeUser = currentUser;
+    if (!activeUser) return;
+
+    Alert.alert('Üyeyi Çıkar', `${memberEmail} kişisini aileden çıkarmak istediğinize emin misiniz?`, [
+      { text: 'İptal', style: 'cancel' },
+      { text: 'Çıkar', style: 'destructive', onPress: async () => {
+          setLoading(true);
+          try {
+            // Sadece bu hanedeki kaydını sil
+            const myMember = members.find(m => m.user_id === activeUser.id);
+            if (!myMember) return;
+
+            const { error } = await supabase.from('household_members')
+              .delete()
+              .eq('household_id', myMember.household_id)
+              .eq('user_id', memberUserId);
+
+            if (error) {
+              Alert.alert('Hata', 'Üye çıkarılamadı: ' + error.message);
+            } else {
+              await loadData(activeUser);
+            }
+          } catch (e: any) {
+            Alert.alert('Hata', 'Beklenmeyen hata: ' + e.message);
+          } finally {
+            setLoading(false);
+          }
         }
       }
     ]);
@@ -289,14 +435,41 @@ export default function FamilyScreen() {
       borderColor = '#94A3B8';
     }
 
+    const isAdmin = members.find(m => m.user_id === currentUser?.id)?.role === 'admin';
+    const isMe = item.user_id === currentUser?.id;
+
     return (
       <View style={[styles.memberCard, { backgroundColor: bgColor, borderColor, borderWidth: 1 }]}>
-        <View style={styles.memberInfo}>
-          <Text style={styles.memberEmail}>{item.email}</Text>
-          {item.user_id === currentUser?.id && <Text style={styles.youBadge}>(Sen)</Text>}
+        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+          <View style={styles.memberInfo}>
+            <Text style={styles.memberEmail}>{item.email}</Text>
+            {item.role === 'admin' && <Text style={{ marginLeft: 6, fontSize: 16 }}>👑</Text>}
+            {isMe && <Text style={styles.youBadge}>(Sen)</Text>}
+          </View>
+          
+          {isAdmin && !isMe && (
+            <TouchableOpacity style={styles.kickBtn} onPress={() => kickMember(item.user_id, item.email)}>
+              <Text style={styles.kickBtnText}>Çıkar</Text>
+            </TouchableOpacity>
+          )}
         </View>
         <Text style={styles.statusLargeText}>{item.last_report_status}</Text>
-        <Text style={styles.lastActive}>Son Durum Bildirimi: {item.last_report_time}</Text>
+        <Text style={styles.timeText}>Güncelleme: {item.last_report_time}</Text>
+
+        {item.last_report_status.includes('🔴') && item.lat && item.lon && (
+          <TouchableOpacity 
+            style={styles.mapButton}
+            onPress={() => {
+              navigation.navigate('MapTab', { 
+                targetLat: item.lat, 
+                targetLng: item.lon, 
+                targetName: item.full_name 
+              });
+            }}
+          >
+            <Text style={styles.mapButtonText}>📍 Konumu Haritada Gör</Text>
+          </TouchableOpacity>
+        )}
       </View>
     );
   };
@@ -310,13 +483,17 @@ export default function FamilyScreen() {
         </View>
       )}
 
-      {!myHouseholdCode && !loading && (
+      {!myHouseholdCode && (
         <View style={styles.setupContainer}>
           <Text style={styles.setupTitle}>Ailenizle Bağlantıda Kalın</Text>
           <Text style={styles.setupDesc}>Afet anında ailenizin durumunu (Güvende / Tehlikede) anlık olarak görebilmek için bir aile ağı oluşturun veya mevcut ağa katılın.</Text>
           
-          <TouchableOpacity style={styles.createBtn} onPress={createFamily}>
-            <Text style={styles.createBtnText}>Yeni Aile Oluştur</Text>
+          <TouchableOpacity style={[styles.createBtn, loading && { opacity: 0.7 }]} onPress={createFamily} disabled={loading}>
+            {loading ? (
+              <ActivityIndicator color="#FFF" />
+            ) : (
+              <Text style={styles.createBtnText}>Yeni Aile Oluştur</Text>
+            )}
           </TouchableOpacity>
 
           <View style={styles.divider}>
@@ -334,8 +511,12 @@ export default function FamilyScreen() {
               value={joinCode}
               onChangeText={setJoinCode}
             />
-            <TouchableOpacity style={styles.joinBtn} onPress={joinFamily}>
-              <Text style={styles.joinBtnText}>Koda Katıl</Text>
+            <TouchableOpacity style={[styles.joinBtn, loading && { opacity: 0.7 }]} onPress={joinFamily} disabled={loading}>
+              {loading ? (
+                <ActivityIndicator color="#FFF" />
+              ) : (
+                <Text style={styles.joinBtnText}>Koda Katıl</Text>
+              )}
             </TouchableOpacity>
           </View>
         </View>
@@ -553,6 +734,19 @@ const styles = StyleSheet.create({
     color: '#3B82F6',
     fontWeight: 'bold',
   },
+  kickBtn: {
+    backgroundColor: '#FEE2E2',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#FECACA'
+  },
+  kickBtnText: {
+    color: '#EF4444',
+    fontSize: 12,
+    fontWeight: 'bold',
+  },
   statusLargeText: {
     fontSize: 18,
     fontWeight: '900',
@@ -561,6 +755,29 @@ const styles = StyleSheet.create({
   lastActive: {
     fontSize: 12,
     color: '#64748B',
+  },
+  timeText: {
+    fontSize: 12,
+    color: '#64748B',
+    marginBottom: 6,
+  },
+  mapButton: {
+    marginTop: 10,
+    backgroundColor: '#DC2626',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+    alignSelf: 'flex-start',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 3,
+    elevation: 2,
+  },
+  mapButtonText: {
+    color: '#FFF',
+    fontSize: 13,
+    fontWeight: 'bold',
   },
   emptyText: {
     textAlign: 'center',

@@ -55,6 +55,7 @@ export const initDb = async () => {
 
     CREATE TABLE IF NOT EXISTS emergency_reports (
       id TEXT PRIMARY KEY,
+      user_id TEXT,
       status_type TEXT NOT NULL,
       latitude REAL,
       longitude REAL,
@@ -147,6 +148,7 @@ export const markMessageAsSynced = async (id: string) => {
  */
 export const insertEmergencyReport = async (
   id: string,
+  user_id: string | null,
   status_type: string,
   latitude: number | null,
   longitude: number | null,
@@ -155,8 +157,8 @@ export const insertEmergencyReport = async (
 ) => {
   const db = await getDb();
   await db.runAsync(
-    'INSERT INTO emergency_reports (id, status_type, latitude, longitude, status, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-    [id ?? '', status_type ?? 'SAFE', latitude ?? null, longitude ?? null, status ?? 'pending', created_at ?? new Date().toISOString()]
+    'INSERT INTO emergency_reports (id, user_id, status_type, latitude, longitude, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    [id ?? '', user_id ?? null, status_type ?? 'SAFE', latitude ?? null, longitude ?? null, status ?? 'pending', created_at ?? new Date().toISOString()]
   );
 };
 

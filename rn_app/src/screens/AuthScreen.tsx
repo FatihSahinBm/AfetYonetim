@@ -1,10 +1,15 @@
 import React, { useState } from 'react';
-import { View, Text, TextInput, TouchableOpacity, StyleSheet, KeyboardAvoidingView, Platform, ActivityIndicator, Alert } from 'react-native';
+import { View, Text, TextInput, TouchableOpacity, StyleSheet, KeyboardAvoidingView, Platform, ActivityIndicator, Alert, ScrollView, Switch } from 'react-native';
 import { supabase } from '../services/supabase';
 
 export default function AuthScreen() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [passwordConfirm, setPasswordConfirm] = useState('');
+  const [fullName, setFullName] = useState('');
+  const [phone, setPhone] = useState('');
+  const [address, setAddress] = useState('');
+  const [knowsFirstAid, setKnowsFirstAid] = useState(false);
   const [loading, setLoading] = useState(false);
   const [isLogin, setIsLogin] = useState(true);
 
@@ -28,6 +33,10 @@ export default function AuthScreen() {
       Alert.alert('Hata', 'Lütfen e-posta ve şifrenizi girin.');
       return;
     }
+    if (password !== passwordConfirm) {
+      Alert.alert('Hata', 'Şifreler uyuşmuyor.');
+      return;
+    }
     setLoading(true);
     const { data, error } = await supabase.auth.signUp({
       email: email,
@@ -37,6 +46,18 @@ export default function AuthScreen() {
     if (error) {
       Alert.alert('Kayıt Başarısız', error.message);
     } else {
+      if (data.user) {
+        // Profil tablosuna ekstra bilgileri kaydet
+        await supabase.from('profiles').upsert({
+          id: data.user.id,
+          email: email,
+          full_name: fullName,
+          phone: phone,
+          address: address,
+          knows_first_aid: knowsFirstAid,
+          last_active_at: new Date().toISOString()
+        });
+      }
       Alert.alert('Başarılı', 'Kayıt başarılı! Lütfen giriş yapın.');
       setIsLogin(true);
     }
@@ -56,7 +77,40 @@ export default function AuthScreen() {
           </Text>
         </View>
 
-        <View style={styles.formContainer}>
+        <ScrollView style={styles.formContainer} showsVerticalScrollIndicator={false}>
+          {!isLogin && (
+            <>
+              <Text style={styles.label}>Ad Soyad</Text>
+              <TextInput
+                style={styles.input}
+                onChangeText={setFullName}
+                value={fullName}
+                placeholder="Örn: Ahmet Yılmaz"
+                placeholderTextColor="#94A3B8"
+              />
+
+              <Text style={styles.label}>Telefon Numarası</Text>
+              <TextInput
+                style={styles.input}
+                onChangeText={setPhone}
+                value={phone}
+                placeholder="05XX XXX XX XX"
+                placeholderTextColor="#94A3B8"
+                keyboardType="phone-pad"
+              />
+
+              <Text style={styles.label}>Yaşadığınız Adres</Text>
+              <TextInput
+                style={[styles.input, { height: 80 }]}
+                onChangeText={setAddress}
+                value={address}
+                placeholder="Açık adresiniz..."
+                placeholderTextColor="#94A3B8"
+                multiline={true}
+              />
+            </>
+          )}
+
           <Text style={styles.label}>E-posta Adresi</Text>
           <TextInput
             style={styles.input}
@@ -79,6 +133,31 @@ export default function AuthScreen() {
             autoCapitalize={'none'}
           />
 
+          {!isLogin && (
+            <>
+              <Text style={styles.label}>Şifre (Tekrar)</Text>
+              <TextInput
+                style={styles.input}
+                onChangeText={setPasswordConfirm}
+                value={passwordConfirm}
+                secureTextEntry={true}
+                placeholder="Şifrenizi tekrar girin"
+                placeholderTextColor="#94A3B8"
+                autoCapitalize={'none'}
+              />
+
+              <View style={styles.switchRow}>
+                <Text style={styles.labelSwitch}>İlk Yardım Eğitimi Aldım</Text>
+                <Switch
+                  value={knowsFirstAid}
+                  onValueChange={setKnowsFirstAid}
+                  trackColor={{ false: '#CBD5E1', true: '#3B82F6' }}
+                  thumbColor={'#FFF'}
+                />
+              </View>
+            </>
+          )}
+
           <TouchableOpacity 
             style={styles.mainButton}
             disabled={loading}
@@ -92,7 +171,7 @@ export default function AuthScreen() {
               </Text>
             )}
           </TouchableOpacity>
-        </View>
+        </ScrollView>
 
         <TouchableOpacity 
           style={styles.switchButton}
@@ -140,6 +219,7 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.05,
     shadowRadius: 10,
     elevation: 3,
+    maxHeight: '75%', // Sığması için yükseklik limiti
   },
   label: {
     fontSize: 14,
@@ -164,6 +244,18 @@ const styles = StyleSheet.create({
     paddingVertical: 14,
     alignItems: 'center',
     marginTop: 8,
+    marginBottom: 8,
+  },
+  switchRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  labelSwitch: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#334155',
   },
   mainButtonText: {
     color: '#FFF',

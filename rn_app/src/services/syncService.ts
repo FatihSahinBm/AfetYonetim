@@ -7,8 +7,17 @@ import { getPendingMessages, markMessageAsSynced, getPendingEmergencyReports, ma
  * @returns {Promise<boolean>} İnternet varsa true, yoksa false döner.
  */
 export const checkInternetConnection = async (): Promise<boolean> => {
-  const networkState = await Network.getNetworkStateAsync();
-  return !!networkState.isConnected && !!networkState.isInternetReachable;
+  try {
+    // 3 saniye timeout ile ağ durumunu kontrol et
+    const networkPromise = Network.getNetworkStateAsync();
+    const timeoutPromise = new Promise<any>((_, reject) => setTimeout(() => reject(new Error('timeout')), 3000));
+    
+    const networkState = await Promise.race([networkPromise, timeoutPromise]);
+    return !!networkState.isConnected && !!networkState.isInternetReachable;
+  } catch (error) {
+    console.log("Ağ durumu kontrol edilirken hata veya zaman aşımı:", error);
+    return false; // Hata durumunda varsayılan olarak çevrimdışı kabul et
+  }
 };
 
 /**
@@ -80,8 +89,11 @@ export const syncPendingEmergencyReports = async () => {
 
       const { error } = await supabase.from('emergency_reports').insert({
         id: report.id,
+        user_id: report.user_id,
         status_type: report.status_type,
         location: locationData,
+        lat: report.latitude,
+        lon: report.longitude,
         status: 'synced',
         created_at: report.created_at,
         is_offline: true,

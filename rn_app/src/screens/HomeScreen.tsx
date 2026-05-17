@@ -10,6 +10,7 @@ import { checkInternetConnection, syncPendingMessages, syncPendingEmergencyRepor
 import { supabase } from '../services/supabase';
 import { getDb, insertEmergencyReport } from '../services/db';
 import DisasterAlert from '../components/DisasterAlert';
+import { generateSyntheticSiren } from '../utils/audioGenerator';
 
 const generateId = () => {
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
@@ -123,9 +124,9 @@ export default function HomeScreen({ navigation }: Props) {
           shouldDuckAndroid: true,
         });
 
-        // Siren mp3'ünü çal
+        // Matematiksel olarak sentezlenen (köpek/sismik uyumlu) siren sesini çal
         const { sound: newSound } = await Audio.Sound.createAsync(
-          require('../../assets/siren.mp3'),
+          { uri: generateSyntheticSiren() },
           { shouldPlay: true, isLooping: true, volume: 1.0 }
         );
         setSound(newSound);
@@ -247,6 +248,9 @@ export default function HomeScreen({ navigation }: Props) {
 
     // Arka planda kaydet ve gönder (AWAIT etmiyoruz ki UI donmasın)
     const processReport = async () => {
+      const { data: authData } = await supabase.auth.getSession();
+      const userId = authData?.session?.user?.id || null;
+
       const online = await checkInternetConnection();
       if (online) {
         let locationData = null;
@@ -256,14 +260,17 @@ export default function HomeScreen({ navigation }: Props) {
         
         await supabase.from('emergency_reports').insert({
           id: newId,
+          user_id: userId,
           status_type: statusType,
           location: locationData,
+          lat: lat,
+          lon: lon,
           status: 'synced',
           created_at: createdAt,
           is_offline: false,
         });
       } else {
-        await insertEmergencyReport(newId, statusType, lat, lon, 'pending', createdAt);
+        await insertEmergencyReport(newId, userId, statusType, lat, lon, 'pending', createdAt);
       }
     };
 

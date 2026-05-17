@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { View, StyleSheet, ActivityIndicator, Alert, TouchableOpacity, Text, Platform, Linking, TextInput, Keyboard } from 'react-native';
+import { useRoute } from '@react-navigation/native';
 import MapView, { Marker, Callout, PROVIDER_GOOGLE, Polyline } from 'react-native-maps';
 import * as Location from 'expo-location';
 import { getDb } from '../services/db';
@@ -13,6 +14,23 @@ export default function MapScreen() {
   const [showNearestList, setShowNearestList] = useState(false);
   const [nearestPoints, setNearestPoints] = useState<any[]>([]);
   const mapRef = useRef<MapView>(null);
+  const route = useRoute<any>();
+
+  useEffect(() => {
+    if (route.params?.targetLat && route.params?.targetLng && location) {
+      const { targetLat, targetLng, targetName } = route.params;
+      setSelectedDest({ lat: targetLat, lng: targetLng, name: targetName || 'Kayıp Kişi' });
+      
+      setTimeout(() => {
+        mapRef.current?.animateToRegion({
+          latitude: (location.coords.latitude + targetLat) / 2,
+          longitude: (location.coords.longitude + targetLng) / 2,
+          latitudeDelta: Math.abs(location.coords.latitude - targetLat) * 2.5 || 0.05,
+          longitudeDelta: Math.abs(location.coords.longitude - targetLng) * 2.5 || 0.05,
+        }, 1000);
+      }, 500);
+    }
+  }, [route.params, location]);
 
   // Kuş uçuşu mesafe hesaplama (Haversine Formülü)
   const getDistanceKm = (lat1: number, lon1: number, lat2: number, lon2: number) => {
@@ -125,6 +143,16 @@ export default function MapScreen() {
             strokeColor="#Eab308" // Turuncu/Sarı Acil Durum Rengi
             strokeWidth={4}
             lineDashPattern={[10, 10]} // Kesik kesik çizgi
+          />
+        )}
+
+        {/* Seçilen Hedef (Kayıp Kişi veya Toplanma Alanı) İçin Özel İşaretçi */}
+        {selectedDest && (
+          <Marker 
+            coordinate={{ latitude: selectedDest.lat, longitude: selectedDest.lng }}
+            pinColor="red"
+            title={selectedDest.name}
+            description="Kuş uçuşu mesafe: Seçili Hedef"
           />
         )}
 
