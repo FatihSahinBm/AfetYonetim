@@ -3,6 +3,7 @@ import { View, Text, StyleSheet, FlatList, TouchableOpacity, ActivityIndicator, 
 import { getDb } from '../services/db';
 import * as Location from 'expo-location';
 import { supabase } from '../services/supabase';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 type AidRequest = {
   id: string;
@@ -23,6 +24,7 @@ export default function AidScreen() {
   const [requests, setRequests] = useState<AidRequest[]>([]);
   const [loading, setLoading] = useState(true);
   const [currentUser, setCurrentUser] = useState<any>(null);
+  const [myAidIds, setMyAidIds] = useState<Set<string>>(new Set());
 
   // Modal States
   const [modalVisible, setModalVisible] = useState(false);
@@ -39,6 +41,11 @@ export default function AidScreen() {
     const { data: { user } } = await supabase.auth.getUser();
     setCurrentUser(user);
 
+    try {
+      const stored = await AsyncStorage.getItem('my_aid_ids');
+      if (stored) setMyAidIds(new Set(JSON.parse(stored)));
+    } catch (e) { }
+
     // Gerçek bir senaryoda önce Supabase'den çekilir, sonra SQLite'a yazılır.
     // Şimdilik test amaçlı sadece SQLite'dan çekelim veya Supabase'den çekelim:
     try {
@@ -46,7 +53,7 @@ export default function AidScreen() {
         .from('aid_requests')
         .select('*')
         .order('created_at', { ascending: false });
-      
+
       if (!error && data) {
         setRequests(data as AidRequest[]);
       }
@@ -54,7 +61,7 @@ export default function AidScreen() {
       console.log('Offline mode active for aid requests');
       // Çevrimdışıysak SQLite'dan okuma yapılabilir.
     }
-    
+
     setLoading(false);
   };
 
@@ -63,17 +70,17 @@ export default function AidScreen() {
       Alert.alert('Hata', 'Lütfen bir açıklama girin.');
       return;
     }
-    
+
     let lat = null;
     let lng = null;
-    
+
     try {
       const loc = await Location.getLastKnownPositionAsync({});
       if (loc) {
         lat = loc.coords.latitude;
         lng = loc.coords.longitude;
       }
-    } catch(e) {}
+    } catch (e) { }
 
     const newReq = {
       user_id: currentUser?.id,
@@ -87,14 +94,22 @@ export default function AidScreen() {
     };
 
     setLoading(true);
-    const { error } = await supabase.from('aid_requests').insert([newReq]);
-    
+    const { data, error } = await supabase.from('aid_requests').insert([newReq]).select().single();
+
     if (error) {
       Alert.alert('Hata', 'İhtiyaç oluşturulamadı.');
     } else {
       Alert.alert('Başarılı', 'Kaydınız oluşturuldu.');
       setModalVisible(false);
       setReqDesc('');
+
+      if (data) {
+        const newSet = new Set(myAidIds);
+        newSet.add(data.id);
+        setMyAidIds(newSet);
+        await AsyncStorage.setItem('my_aid_ids', JSON.stringify(Array.from(newSet)));
+      }
+
       loadData();
     }
     setLoading(false);
@@ -107,7 +122,7 @@ export default function AidScreen() {
       .from('aid_requests')
       .update({ status: 'in_progress', helper_id: currentUser.id })
       .eq('id', reqId);
-    
+
     if (error) {
       Alert.alert('Hata', 'Grev alınamadı.');
     } else {
@@ -127,10 +142,35 @@ export default function AidScreen() {
     setLoading(false);
   };
 
+  const deleteRequest = (reqId: string) => {
+    Alert.alert(
+      'Talebi Sil',
+      'Bu talebinizi kalıcı olarak silmek istediğinize emin misiniz?',
+      [
+        { text: 'İptal', style: 'cancel' },
+        {
+          text: 'Evet, Sil',
+          style: 'destructive',
+          onPress: async () => {
+            setLoading(true);
+            const { error } = await supabase.from('aid_requests').delete().eq('id', reqId);
+            if (!error) {
+              Alert.alert('Silindi', 'Talebiniz başarıyla silindi.');
+              loadData();
+            } else {
+              Alert.alert('Hata', 'Silme işlemi başarısız oldu: ' + error.message);
+            }
+            setLoading(false);
+          }
+        }
+      ]
+    );
+  };
+
   const renderItem = ({ item }: { item: AidRequest }) => {
-    const isMine = item.user_id === currentUser?.id;
+    const isMine = (currentUser && item.user_id === currentUser.id) || myAidIds.has(item.id);
     const iAmHelper = item.helper_id === currentUser?.id;
-    
+
     if (activeTab === 'MY_REQUESTS' && !isMine && !iAmHelper) return null;
 
     let statusColor = '#EAB308'; // Bekliyor
@@ -162,7 +202,7 @@ export default function AidScreen() {
             <Text style={styles.takeJobBtnText}>Ben Götürüyorum (Üstlen)</Text>
           </TouchableOpacity>
         )}
-        
+
         {item.status === 'pending' && !isMine && item.type === 'DONATION' && (
           <TouchableOpacity style={[styles.takeJobBtn, { backgroundColor: '#10B981' }]} onPress={() => takeJob(item.id)}>
             <Text style={styles.takeJobBtnText}>Bana Lazım (Talep Et)</Text>
@@ -172,6 +212,13 @@ export default function AidScreen() {
         {(isMine || iAmHelper) && item.status === 'in_progress' && (
           <TouchableOpacity style={styles.resolveBtn} onPress={() => markResolved(item.id)}>
             <Text style={styles.resolveBtnText}>İşlemi Tamamla</Text>
+          </TouchableOpacity>
+        )}
+
+        {/* Sil Butonu (Eğer talep benimse) */}
+        {isMine && (
+          <TouchableOpacity style={[styles.takeJobBtn, { backgroundColor: '#EF4444', marginTop: item.status === 'in_progress' ? 8 : 0 }]} onPress={() => deleteRequest(item.id)}>
+            <Text style={styles.takeJobBtnText}>🗑️ Talebi Sil</Text>
           </TouchableOpacity>
         )}
       </View>
@@ -213,12 +260,12 @@ export default function AidScreen() {
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <Text style={styles.modalTitle}>Yeni İlan Oluştur</Text>
-            
+
             <View style={styles.row}>
-              <TouchableOpacity style={[styles.typeBtn, reqType === 'NEED' && {backgroundColor: '#EF4444'}]} onPress={() => setReqType('NEED')}>
+              <TouchableOpacity style={[styles.typeBtn, reqType === 'NEED' && { backgroundColor: '#EF4444' }]} onPress={() => setReqType('NEED')}>
                 <Text style={styles.typeBtnText}>İhtiyacım Var</Text>
               </TouchableOpacity>
-              <TouchableOpacity style={[styles.typeBtn, reqType === 'DONATION' && {backgroundColor: '#10B981'}]} onPress={() => setReqType('DONATION')}>
+              <TouchableOpacity style={[styles.typeBtn, reqType === 'DONATION' && { backgroundColor: '#10B981' }]} onPress={() => setReqType('DONATION')}>
                 <Text style={styles.typeBtnText}>Yardım Edebilirim</Text>
               </TouchableOpacity>
             </View>
@@ -227,7 +274,7 @@ export default function AidScreen() {
             <View style={styles.rowWrap}>
               {['SU', 'GIDA', 'CADIR', 'ILAC', 'DIGER'].map(c => (
                 <TouchableOpacity key={c} style={[styles.catBtn, reqCategory === c && styles.catBtnActive]} onPress={() => setReqCategory(c)}>
-                  <Text style={[styles.catBtnText, reqCategory === c && {color:'#FFF'}]}>{c}</Text>
+                  <Text style={[styles.catBtnText, reqCategory === c && { color: '#FFF' }]}>{c}</Text>
                 </TouchableOpacity>
               ))}
             </View>

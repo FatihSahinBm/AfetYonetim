@@ -7,6 +7,7 @@ import * as ImagePicker from 'expo-image-picker';
 import { getDb, updateAidRequestStatus, insertHazardReport, getPendingHazardReports } from '../services/db';
 import { checkInternetConnection } from '../services/syncService';
 import { supabase } from '../services/supabase';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const generateId = () => {
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
@@ -31,6 +32,7 @@ export default function MapScreen() {
   const [imageUri, setImageUri] = useState<string | null>(null);
   // Düzenle / Sil
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const [myHazardIds, setMyHazardIds] = useState<Set<string>>(new Set());
   const [editingReport, setEditingReport] = useState<any | null>(null); // null = yeni bildirim
   const mapRef = useRef<MapView>(null);
   const route = useRoute<any>();
@@ -134,6 +136,9 @@ export default function MapScreen() {
 
   const fetchHazardReports = async () => {
     try {
+      const storedIds = await AsyncStorage.getItem('my_hazard_ids');
+      if (storedIds) setMyHazardIds(new Set(JSON.parse(storedIds)));
+
       const isOnline = await checkInternetConnection();
       if (isOnline) {
         // En az 3 yalanlama almayanları göster
@@ -195,10 +200,15 @@ export default function MapScreen() {
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ImagePicker.MediaTypeOptions.Images,
       allowsEditing: true,
-      quality: 0.5, // Dosya boyutunu küçültmek için
+      quality: 0.3, // Dosya boyutunu iyice küçült (Base64 için)
+      base64: true, // Diğer cihazların görebilmesi için Base64 formatı isteyelim
     });
     if (!result.canceled) {
-      setImageUri(result.assets[0].uri);
+      if (result.assets[0].base64) {
+        setImageUri(`data:image/jpeg;base64,${result.assets[0].base64}`);
+      } else {
+        setImageUri(result.assets[0].uri);
+      }
     }
   };
 
@@ -275,10 +285,20 @@ export default function MapScreen() {
         console.error('Supabase Insert Error:', error);
         // Fallback to local
         await insertHazardReport(newId, userId, hazardType, hazardDesc, lat, lon, imageUri, 'pending', createdAt);
+      } else {
+        const newSet = new Set(myHazardIds);
+        newSet.add(newId);
+        setMyHazardIds(newSet);
+        await AsyncStorage.setItem('my_hazard_ids', JSON.stringify(Array.from(newSet)));
       }
     } else {
       await insertHazardReport(newId, userId, hazardType, hazardDesc, lat, lon, imageUri, 'pending', createdAt);
+      const newSet = new Set(myHazardIds);
+      newSet.add(newId);
+      setMyHazardIds(newSet);
+      await AsyncStorage.setItem('my_hazard_ids', JSON.stringify(Array.from(newSet)));
     }
+
 
     setHazardDesc('');
     setImageUri(null);
@@ -413,7 +433,7 @@ export default function MapScreen() {
         {/* Tehlike Raporları */}
         {hazardReports.map(report => {
           if (!report.latitude || !report.longitude) return null;
-          const isOwner = currentUserId && report.user_id === currentUserId;
+          const isOwner = (currentUserId && report.user_id === currentUserId) || myHazardIds.has(report.id);
           return (
             <Marker
               key={`haz-${report.id}`}

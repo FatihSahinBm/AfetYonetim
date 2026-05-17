@@ -22,7 +22,7 @@ const generateId = () => {
 };
 
 type Props = {
-  navigation: NativeStackNavigationProp<RootStackParamList, 'Home'>;
+  navigation: NativeStackNavigationProp<any, any>;
 };
 
 export default function HomeScreen({ navigation }: Props) {
@@ -347,13 +347,7 @@ export default function HomeScreen({ navigation }: Props) {
       } else if (myIds.length > 0) {
         query = query.in('id', myIds);
       } else {
-        if (__DEV__) {
-          // Dev modundaysak tüm ihbarları "benim" gibi göstersin
-          const { data } = await supabase.from('hazard_reports').select('*').order('created_at', { ascending: false }).limit(5);
-          if (data) setMyReports(data);
-        } else {
-          setMyReports([]);
-        }
+        setMyReports([]);
         return;
       }
 
@@ -398,7 +392,7 @@ export default function HomeScreen({ navigation }: Props) {
       }
       const db = await getDb();
       await db.runAsync('UPDATE hazard_reports SET hazard_type = ?, description = ? WHERE id = ?', [editType, editDesc, editingReport.id]);
-      
+
       Alert.alert('Başarılı', 'İhbarınız güncellendi.');
       setShowEditModal(false);
       setEditingReport(null);
@@ -718,8 +712,8 @@ export default function HomeScreen({ navigation }: Props) {
                   )}
                   <Text style={styles.hazardDescText} numberOfLines={2}>{item.description}</Text>
                   <View style={{ flexDirection: 'row', gap: 8, marginTop: 12 }}>
-                    <TouchableOpacity 
-                      style={[styles.voteBtn, { backgroundColor: '#7C3AED', flex: 1 }]} 
+                    <TouchableOpacity
+                      style={[styles.voteBtn, { backgroundColor: '#7C3AED', flex: 1 }]}
                       onPress={() => {
                         setEditingReport(item);
                         setEditType(item.hazard_type);
@@ -729,8 +723,8 @@ export default function HomeScreen({ navigation }: Props) {
                     >
                       <Text style={styles.voteBtnText}>✏️ Düzenle</Text>
                     </TouchableOpacity>
-                    <TouchableOpacity 
-                      style={[styles.voteBtn, { backgroundColor: '#EF4444', flex: 1 }]} 
+                    <TouchableOpacity
+                      style={[styles.voteBtn, { backgroundColor: '#EF4444', flex: 1 }]}
                       onPress={() => handleDeleteMyReport(item.id)}
                     >
                       <Text style={styles.voteBtnText}>🗑️ Sil</Text>
@@ -1299,5 +1293,17 @@ const styles = StyleSheet.create({
     color: '#FFF',
     fontSize: 12,
     fontWeight: 'bold',
+  },
+  typeBtnSelected: {
+    backgroundColor: '#7C3AED',
+  },
+  typeBtnTextSelected: {
+    color: '#FFF',
+  },
+  modalActions: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: 12,
+    marginTop: 16,
   }
 });

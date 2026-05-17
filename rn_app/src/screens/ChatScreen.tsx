@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, TextInput, TouchableOpacity, FlatList, StyleSheet, KeyboardAvoidingView, Platform, ActivityIndicator } from 'react-native';
-import { getLocalMessages, insertLocalMessage } from '../services/db';
+import { View, Text, TextInput, TouchableOpacity, FlatList, StyleSheet, KeyboardAvoidingView, Platform, ActivityIndicator, Alert, ScrollView } from 'react-native';
+import { getDb, getLocalMessages, insertLocalMessage } from '../services/db';
 import { checkInternetConnection, syncPendingMessages } from '../services/syncService';
 import { supabase } from '../services/supabase';
 // UUID generator for React Native without native crypto (for expo-managed offline id creation)
@@ -11,11 +11,42 @@ const generateId = () => {
   });
 };
 
+const quickReplies = [
+  "Durumum iyi, güvendeyim.",
+  "Acil yardıma ihtiyacım var!",
+  "Enkaz altındayım.",
+  "Yakınlarda toplanma alanı var mı?",
+  "İlk yardım malzemesi lazım."
+];
+
 export default function ChatScreen() {
   const [messages, setMessages] = useState<any[]>([]);
   const [inputText, setInputText] = useState('');
   const [isOnline, setIsOnline] = useState(false);
   const [loading, setLoading] = useState(false);
+  
+  // Bluetooth Simulation State
+  const [isBluetoothMode, setIsBluetoothMode] = useState(false);
+  const [isSearching, setIsSearching] = useState(false);
+
+  const clearChat = async () => {
+    Alert.alert(
+      'Sohbeti Temizle',
+      'Tüm mesajları kalıcı olarak silmek istediğinize emin misiniz?',
+      [
+        { text: 'İptal', style: 'cancel' },
+        { 
+          text: 'Evet, Sil', 
+          style: 'destructive', 
+          onPress: async () => {
+            const db = await getDb();
+            await db.runAsync('DELETE FROM messages');
+            setMessages([]);
+          }
+        }
+      ]
+    );
+  };
 
   const fetchMessages = async () => {
     setLoading(true);
@@ -85,20 +116,40 @@ export default function ChatScreen() {
     const createdAt = new Date().toISOString();
     const tempMsg = {
       id: newId,
-      sender_name: 'Anonim Kullanıcı', // Kimlik doğrulama eklenene kadar
+      sender_name: isBluetoothMode ? 'Bluetooth (Ben)' : 'Anonim Kullanıcı',
       text: inputText.trim(),
-      latitude: null, // Konum servisi entegre edilirse doldurulacak
+      latitude: null,
       longitude: null,
-      status: isOnline ? 'synced' : 'pending',
+      status: isBluetoothMode ? 'bluetooth' : (isOnline ? 'synced' : 'pending'),
       created_at: createdAt,
     };
 
-    // UI'ı anında güncelle
     setMessages(prev => [tempMsg, ...prev]);
     setInputText('');
 
+    if (isBluetoothMode) {
+      // Bluetooth simülasyonu: Sadece lokal DB'ye özel formatta yaz ve fake yanıt oluştur
+      await insertLocalMessage(tempMsg.id, tempMsg.sender_name, tempMsg.text, null, null, 'bluetooth', tempMsg.created_at);
+      
+      setTimeout(async () => {
+        const replyId = generateId();
+        const replyMsg = {
+          id: replyId,
+          sender_name: 'Yakındaki Cihaz (BT)',
+          text: 'Mesajınızı Bluetooth üzerinden aldım! Durumumuz iyi.',
+          latitude: null,
+          longitude: null,
+          status: 'bluetooth',
+          created_at: new Date().toISOString(),
+        };
+        setMessages(prev => [replyMsg, ...prev]);
+        await insertLocalMessage(replyId, replyMsg.sender_name, replyMsg.text, null, null, 'bluetooth', replyMsg.created_at);
+      }, 3000);
+
+      return;
+    }
+
     if (isOnline) {
-      // Direkt Supabase'e yaz
       const { error } = await supabase.from('messages').insert({
         id: tempMsg.id,
         sender_name: tempMsg.sender_name,
@@ -110,20 +161,20 @@ export default function ChatScreen() {
       });
 
       if (error) {
-        // Gönderilemediyse locale kaydet
         await insertLocalMessage(tempMsg.id, tempMsg.sender_name, tempMsg.text, null, null, 'pending', tempMsg.created_at);
       }
     } else {
-      // Offline'sa locale kaydet
       await insertLocalMessage(tempMsg.id, tempMsg.sender_name, tempMsg.text, null, null, 'pending', tempMsg.created_at);
     }
   };
 
   const renderMessage = ({ item }: { item: any }) => {
-    const isMe = item.sender_name === 'Anonim Kullanıcı'; // Geçici mantık
+    const isMe = item.sender_name === 'Anonim Kullanıcı' || item.sender_name === 'Bluetooth (Ben)';
+    const isBT = item.status === 'bluetooth';
+
     return (
-      <View style={[styles.messageBubble, isMe ? styles.myBubble : styles.otherBubble]}>
-        <Text style={styles.senderName}>{item.sender_name}</Text>
+      <View style={[styles.messageBubble, isMe ? styles.myBubble : styles.otherBubble, isBT && !isMe && { backgroundColor: '#E0E7FF', borderColor: '#818CF8', borderWidth: 1 }]}>
+        <Text style={styles.senderName}>{item.sender_name} {isBT && '📶'}</Text>
         <Text style={[styles.messageText, isMe ? styles.myMessageText : styles.otherMessageText]}>
           {item.text}
         </Text>
@@ -133,12 +184,20 @@ export default function ChatScreen() {
           </Text>
           {isMe && (
             <Text style={styles.statusIcon}>
-              {item.status === 'pending' ? '🕒' : '✓'}
+              {item.status === 'pending' ? '🕒' : item.status === 'bluetooth' ? '📶' : '✓'}
             </Text>
           )}
         </View>
       </View>
     );
+  };
+
+  const toggleBluetooth = () => {
+    if (!isBluetoothMode) {
+      setIsSearching(true);
+      setTimeout(() => setIsSearching(false), 3000); // Simulate searching for 3s
+    }
+    setIsBluetoothMode(!isBluetoothMode);
   };
 
   return (
@@ -147,11 +206,37 @@ export default function ChatScreen() {
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
     >
-      <View style={[styles.networkBanner, { backgroundColor: isOnline ? '#10B981' : '#F59E0B' }]}>
-        <Text style={styles.networkText}>
-          {isOnline ? 'Online Mesajlaşma' : 'Offline Mesajlaşma - Mesajlarınız beklemeye alındı'}
-        </Text>
+      <View style={styles.header}>
+        <TouchableOpacity style={[styles.btToggleBtn, isBluetoothMode && styles.btToggleActive]} onPress={toggleBluetooth}>
+          <Text style={styles.btToggleText}>
+            {isBluetoothMode ? '🔵 Bluetooth Açık' : '⚪ Bluetooth P2P'}
+          </Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.clearBtn} onPress={clearChat}>
+          <Text style={styles.clearBtnText}>Sohbeti Temizle</Text>
+        </TouchableOpacity>
       </View>
+
+      {isBluetoothMode && isSearching && (
+        <View style={styles.radarContainer}>
+          <ActivityIndicator size="large" color="#3B82F6" />
+          <Text style={styles.radarText}>Yakındaki cihazlar aranıyor...</Text>
+        </View>
+      )}
+
+      {isBluetoothMode && !isSearching && (
+        <View style={styles.radarContainerSuccess}>
+          <Text style={styles.radarTextSuccess}>✅ 3 Cihaz Bulundu. Güvenli bağlantı kuruldu.</Text>
+        </View>
+      )}
+
+      {!isBluetoothMode && (
+        <View style={[styles.networkBanner, { backgroundColor: isOnline ? '#10B981' : '#F59E0B' }]}>
+          <Text style={styles.networkText}>
+            {isOnline ? 'Online Mesajlaşma' : 'Offline Mesajlaşma - Mesajlarınız beklemeye alındı'}
+          </Text>
+        </View>
+      )}
 
       {loading ? (
         <ActivityIndicator size="large" color="#3B82F6" style={{ flex: 1 }} />
@@ -164,6 +249,25 @@ export default function ChatScreen() {
           contentContainerStyle={styles.listContainer}
         />
       )}
+
+      <View>
+        <ScrollView 
+          horizontal 
+          showsHorizontalScrollIndicator={false} 
+          style={styles.quickReplyContainer}
+          contentContainerStyle={styles.quickReplyContent}
+        >
+          {quickReplies.map((reply, index) => (
+            <TouchableOpacity 
+              key={index} 
+              style={styles.quickReplyBtn}
+              onPress={() => setInputText(reply)}
+            >
+              <Text style={styles.quickReplyText}>{reply}</Text>
+            </TouchableOpacity>
+          ))}
+        </ScrollView>
+      </View>
 
       <View style={styles.inputContainer}>
         <TextInput
@@ -287,4 +391,84 @@ const styles = StyleSheet.create({
     color: '#FFF',
     fontWeight: 'bold',
   },
+  header: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    padding: 16,
+    backgroundColor: '#FFF',
+    borderBottomWidth: 1,
+    borderBottomColor: '#E2E8F0',
+  },
+  btToggleBtn: {
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    borderRadius: 20,
+    backgroundColor: '#F1F5F9',
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+  },
+  btToggleActive: {
+    backgroundColor: '#E0E7FF',
+    borderColor: '#818CF8',
+  },
+  btToggleText: {
+    fontWeight: 'bold',
+    color: '#475569',
+  },
+  clearBtn: {
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    borderRadius: 20,
+    backgroundColor: '#FEE2E2',
+  },
+  clearBtnText: {
+    fontWeight: 'bold',
+    color: '#EF4444',
+  },
+  radarContainer: {
+    padding: 20,
+    alignItems: 'center',
+    backgroundColor: '#F8FAFC',
+    borderBottomWidth: 1,
+    borderBottomColor: '#E2E8F0',
+  },
+  radarText: {
+    marginTop: 12,
+    color: '#3B82F6',
+    fontWeight: 'bold',
+  },
+  radarContainerSuccess: {
+    padding: 16,
+    alignItems: 'center',
+    backgroundColor: '#ECFDF5',
+    borderBottomWidth: 1,
+    borderBottomColor: '#D1FAE5',
+  },
+  radarTextSuccess: {
+    color: '#10B981',
+    fontWeight: 'bold',
+  },
+  quickReplyContainer: {
+    backgroundColor: '#FFF',
+    borderTopWidth: 1,
+    borderTopColor: '#F1F5F9',
+  },
+  quickReplyContent: {
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    gap: 8,
+  },
+  quickReplyBtn: {
+    backgroundColor: '#EFF6FF',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#BFDBFE',
+  },
+  quickReplyText: {
+    color: '#2563EB',
+    fontSize: 13,
+    fontWeight: '500',
+  }
 });

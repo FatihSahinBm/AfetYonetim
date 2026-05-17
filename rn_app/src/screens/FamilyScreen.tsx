@@ -113,7 +113,7 @@ export default function FamilyScreen() {
       if (myHouseholds && myHouseholds.length > 0) {
         const firstHousehold = myHouseholds[0];
         primaryHouseholdId = firstHousehold.household_id;
-        const hName = Array.isArray(firstHousehold.households) ? firstHousehold.households[0]?.name : firstHousehold.households?.name;
+        const hName = Array.isArray(firstHousehold.households) ? (firstHousehold.households[0] as any)?.name : (firstHousehold.households as any)?.name;
         if (hName && hName.startsWith('Aile-')) {
           setMyHouseholdCode(hName.replace('Aile-', ''));
         }
