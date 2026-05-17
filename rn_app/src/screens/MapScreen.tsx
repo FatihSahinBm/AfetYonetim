@@ -29,6 +29,9 @@ export default function MapScreen() {
   const [hazardType, setHazardType] = useState('ENKAZ');
   const [hazardDesc, setHazardDesc] = useState('');
   const [imageUri, setImageUri] = useState<string | null>(null);
+  // Düzenle / Sil
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const [editingReport, setEditingReport] = useState<any | null>(null); // null = yeni bildirim
   const mapRef = useRef<MapView>(null);
   const route = useRoute<any>();
 
@@ -72,6 +75,11 @@ export default function MapScreen() {
   }
 
   useEffect(() => {
+    // Kullanıcı ID'sini çek
+    supabase.auth.getSession().then(({ data }) => {
+      setCurrentUserId(data?.session?.user?.id || null);
+    });
+
     (async () => {
       let currentLoc: Location.LocationObject | null = null;
       let { status } = await Location.requestForegroundPermissionsAsync();
@@ -158,8 +166,8 @@ export default function MapScreen() {
       `${req.full_name || 'Bu kişiye'} yardım etmeyi onaylıyor musunuz? Çağrı durumu güncellenecek.`,
       [
         { text: 'İptal', style: 'cancel' },
-        { 
-          text: 'Evet, Gidiyorum', 
+        {
+          text: 'Evet, Gidiyorum',
           onPress: async () => {
             const isOnline = await checkInternetConnection();
             const { data: authData } = await supabase.auth.getSession();
@@ -201,6 +209,36 @@ export default function MapScreen() {
     }
 
     setShowReportModal(false);
+
+    const { data: authData } = await supabase.auth.getSession();
+    const userId = authData?.session?.user?.id || 'anonymous';
+
+    // Düzenle modu
+    if (editingReport) {
+      Alert.alert('Güncelleniyor', 'Bildiriminiz güncelleniyor...');
+      const isOnline = await checkInternetConnection();
+      if (isOnline) {
+        const { error } = await supabase.from('hazard_reports').update({
+          hazard_type: hazardType,
+          description: hazardDesc,
+          image_uri: imageUri,
+        }).eq('id', editingReport.id);
+        if (error) Alert.alert('Hata', 'Güncelleme başarısız: ' + error.message);
+      } else {
+        const db = await getDb();
+        await db.runAsync(
+          'UPDATE hazard_reports SET hazard_type = ?, description = ?, image_uri = ? WHERE id = ?',
+          [hazardType, hazardDesc, imageUri, editingReport.id]
+        );
+      }
+      setHazardDesc('');
+      setImageUri(null);
+      setEditingReport(null);
+      Alert.alert('Başarılı', 'İhbarınız başarıyla güncellendi.');
+      fetchHazardReports();
+      return;
+    }
+
     Alert.alert('Gönderiliyor', 'Tehlike bildiriminiz işleniyor...');
 
     const newId = generateId();
@@ -208,8 +246,7 @@ export default function MapScreen() {
     const lon = location ? location.coords.longitude : null;
     const createdAt = new Date().toISOString();
 
-    const { data: authData } = await supabase.auth.getSession();
-    const userId = authData?.session?.user?.id || 'anonymous';
+    // userId zaten yukarıda tanımlandı, tekrar tanımlamaya gerek yok
 
     const online = await checkInternetConnection();
     if (online) {
@@ -245,8 +282,43 @@ export default function MapScreen() {
 
     setHazardDesc('');
     setImageUri(null);
-    Alert.alert('Başarılı', 'İhbarınız bölgedeki kullanıcılara iletildi. Doğrulama bekliyor.');
+    setEditingReport(null);
+    Alert.alert('Başarılı', editingReport ? 'İhbarınız güncellendi.' : 'İhbarınız bölgedeki kullanıcılara iletildi. Doğrulama bekliyor.');
     fetchHazardReports();
+  };
+
+  const openEditHazard = (report: any) => {
+    setEditingReport(report);
+    setHazardType(report.hazard_type);
+    setHazardDesc(report.description || '');
+    setImageUri(report.image_uri || null);
+    setShowReportModal(true);
+  };
+
+  const handleDeleteHazard = (report: any) => {
+    Alert.alert(
+      'Bildirimi Sil',
+      'Bu tehlike ihbarını silmek istediğinizden emin misiniz?',
+      [
+        { text: 'İptal', style: 'cancel' },
+        {
+          text: 'Evet, Sil',
+          style: 'destructive',
+          onPress: async () => {
+            const isOnline = await checkInternetConnection();
+            if (isOnline) {
+              const { error } = await supabase.from('hazard_reports').delete().eq('id', report.id);
+              if (error) { Alert.alert('Hata', 'Silme işlemi başarısız: ' + error.message); return; }
+            } else {
+              const db = await getDb();
+              await db.runAsync('DELETE FROM hazard_reports WHERE id = ?', [report.id]);
+            }
+            Alert.alert('Silindi', 'Tehlike ihbarınız kaldırıldı.');
+            fetchHazardReports();
+          }
+        }
+      ]
+    );
   };
 
   const openDirections = (lat: number, lng: number, name: string) => {
@@ -317,7 +389,7 @@ export default function MapScreen() {
         {aidRequests.map(req => {
           if (!req.latitude || !req.longitude) return null;
           return (
-            <Marker 
+            <Marker
               key={`aid-${req.id}`}
               coordinate={{ latitude: req.latitude, longitude: req.longitude }}
               title={`🆘 ${req.type}`}
@@ -328,7 +400,7 @@ export default function MapScreen() {
               <Callout onPress={() => handleHelpVolunteer(req)}>
                 <View style={styles.callout}>
                   <Text style={styles.calloutTitle}>🆘 {req.type}</Text>
-                  <Text style={styles.calloutDesc}><Text style={{fontWeight: 'bold'}}>{req.full_name}</Text>: {req.description}</Text>
+                  <Text style={styles.calloutDesc}><Text style={{ fontWeight: 'bold' }}>{req.full_name}</Text>: {req.description}</Text>
                   <TouchableOpacity style={[styles.routeBtn, { backgroundColor: '#EF4444', marginTop: 8 }]}>
                     <Text style={styles.routeBtnText}>Yardıma Gidiyorum</Text>
                   </TouchableOpacity>
@@ -341,20 +413,40 @@ export default function MapScreen() {
         {/* Tehlike Raporları */}
         {hazardReports.map(report => {
           if (!report.latitude || !report.longitude) return null;
+          const isOwner = currentUserId && report.user_id === currentUserId;
           return (
-            <Marker 
+            <Marker
               key={`haz-${report.id}`}
               coordinate={{ latitude: report.latitude, longitude: report.longitude }}
               title={`⚠️ ${report.hazard_type}`}
             >
-              <View style={[styles.aidMarker, { borderColor: '#F59E0B', shadowColor: '#F59E0B' }]}>
-                <Text style={styles.aidMarkerText}>⚠️</Text>
+              <View style={[styles.aidMarker, { borderColor: isOwner ? '#7C3AED' : '#F59E0B', shadowColor: isOwner ? '#7C3AED' : '#F59E0B' }]}>
+                <Text style={styles.aidMarkerText}>{isOwner ? '🟣' : '⚠️'}</Text>
               </View>
-              <Callout onPress={() => openDirections(report.latitude, report.longitude, report.hazard_type)}>
+              <Callout>
                 <View style={styles.callout}>
-                  <Text style={[styles.calloutTitle, { color: '#F59E0B' }]}>⚠️ {report.hazard_type}</Text>
+                  <Text style={[styles.calloutTitle, { color: isOwner ? '#7C3AED' : '#F59E0B' }]}>
+                    {isOwner ? '🟣 Benim İhbarım' : '⚠️ ' + report.hazard_type}
+                  </Text>
+                  <Text style={[styles.calloutTitle, { fontSize: 12, color: '#475569', marginBottom: 2 }]}>{report.hazard_type}</Text>
                   <Text style={styles.calloutDesc}>{report.description}</Text>
-                  <Text style={{fontSize: 10, color: '#94A3B8', marginTop: 4}}>👍 {report.upvotes} | 👎 {report.downvotes}</Text>
+                  <Text style={{ fontSize: 10, color: '#94A3B8', marginTop: 4 }}>👍 {report.upvotes} | 👎 {report.downvotes}</Text>
+                  {isOwner && (
+                    <View style={{ flexDirection: 'row', gap: 6, marginTop: 8 }}>
+                      <TouchableOpacity
+                        style={[styles.routeBtn, { backgroundColor: '#7C3AED', flex: 1 }]}
+                        onPress={() => openEditHazard(report)}
+                      >
+                        <Text style={styles.routeBtnText}>✏️ Düzenle</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={[styles.routeBtn, { backgroundColor: '#EF4444', flex: 1 }]}
+                        onPress={() => handleDeleteHazard(report)}
+                      >
+                        <Text style={styles.routeBtnText}>🗑️ Sil</Text>
+                      </TouchableOpacity>
+                    </View>
+                  )}
                 </View>
               </Callout>
             </Marker>
@@ -523,23 +615,23 @@ export default function MapScreen() {
       </TouchableOpacity>
 
       {/* Tehlike Bildir Floating Button */}
-      <TouchableOpacity 
+      <TouchableOpacity
         style={styles.fab}
         onPress={() => setShowReportModal(true)}
       >
         <Text style={styles.fabIcon}>⚠️</Text>
       </TouchableOpacity>
 
-      {/* Tehlike Bildir Modal */}
+      {/* Tehlike Bildir / Düzenle Modal */}
       <Modal visible={showReportModal} animationType="slide" transparent>
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
-            <Text style={styles.modalTitle}>⚠️ Tehlike Bildir</Text>
+            <Text style={styles.modalTitle}>{editingReport ? '✏️ İhbarı Düzenle' : '⚠️ Tehlike Bildir'}</Text>
 
             <Text style={styles.label}>Tehlike Türü:</Text>
             <View style={styles.typeContainer}>
               {['ENKAZ', 'SEL', 'YANGIN', 'KAPALI YOL'].map((t) => (
-                <TouchableOpacity 
+                <TouchableOpacity
                   key={t}
                   style={[styles.typeBtn, hazardType === t && styles.typeBtnActive]}
                   onPress={() => setHazardType(t)}
@@ -559,7 +651,7 @@ export default function MapScreen() {
             </TouchableOpacity>
 
             <Text style={styles.label}>Açıklama:</Text>
-            <TextInput 
+            <TextInput
               style={[styles.input, styles.textArea]}
               placeholder="Yıkılan bina, kapanan yol hakkında detay verin..."
               value={hazardDesc}
@@ -568,10 +660,15 @@ export default function MapScreen() {
             />
 
             <TouchableOpacity style={styles.submitBtn} onPress={submitHazardReport}>
-              <Text style={styles.submitBtnText}>Bildirimi Gönder</Text>
+              <Text style={styles.submitBtnText}>{editingReport ? 'Kaydı Güncelle' : 'Bildirimi Gönder'}</Text>
             </TouchableOpacity>
 
-            <TouchableOpacity style={styles.cancelBtn} onPress={() => setShowReportModal(false)}>
+            <TouchableOpacity style={styles.cancelBtn} onPress={() => {
+              setShowReportModal(false);
+              setEditingReport(null);
+              setHazardDesc('');
+              setImageUri(null);
+            }}>
               <Text style={styles.cancelBtnText}>İptal</Text>
             </TouchableOpacity>
           </View>

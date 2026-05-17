@@ -40,10 +40,19 @@ export default function HomeScreen({ navigation }: Props) {
   const [aidType, setAidType] = useState('Tıbbi Yardım');
   const [aidDesc, setAidDesc] = useState('');
 
+  // Düzenleme stateleri
+  const [showEditModal, setShowEditModal] = useState(false);
+  const [editingReport, setEditingReport] = useState<any>(null);
+  const [editDesc, setEditDesc] = useState('');
+  const [editType, setEditType] = useState('ENKAZ');
+
   // Tehlike raporları (Topluluk Oylaması)
   const [communityHazards, setCommunityHazards] = useState<any[]>([]);
-  // Kullanıcının oy verdiği ihbar id'leri
   const [votedHazards, setVotedHazards] = useState<Set<string>>(new Set());
+  // Geçmiş ihbarlarım
+  const [myReports, setMyReports] = useState<any[]>([]);
+  // Kriz Masası uyarıları (Realtime)
+  const [disasterAlerts, setDisasterAlerts] = useState<any[]>([]);
 
   // Yapay Zeka Sel ve Deprem Analizleri Simülasyonu
   useEffect(() => {
@@ -203,7 +212,7 @@ export default function HomeScreen({ navigation }: Props) {
   const loadGatheringPointsFromLocal = async () => {
     const db = await getDb();
     const rows = await db.getAllAsync('SELECT * FROM gathering_points ORDER BY created_at DESC');
-    
+
     if (rows.length === 0) {
       // Mock data if DB is empty
       const mockPoints = [
@@ -222,10 +231,40 @@ export default function HomeScreen({ navigation }: Props) {
   useEffect(() => {
     checkNetworkAndSync();
 
+    // Kriz Masası'ndan gelen uyarıları çek
+    const fetchActiveAlerts = async () => {
+      try {
+        const { data } = await supabase
+          .from('disaster_alerts')
+          .select('*')
+          .eq('is_active', true)
+          .order('created_at', { ascending: false });
+        if (data) setDisasterAlerts(data);
+      } catch (e) { console.log('Alert fetch error:', e); }
+    };
+    fetchActiveAlerts();
+
+    // Supabase Realtime — Kriz Masası'ndan anlık uyarı geldiğinde tetikle
+    const channel = supabase
+      .channel('disaster_alerts_channel')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'disaster_alerts' }, payload => {
+        const newAlert = payload.new as any;
+        setDisasterAlerts(prev => [newAlert, ...prev]);
+        Vibration.vibrate([0, 500, 200, 500, 200, 1000]);
+      })
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'disaster_alerts' }, payload => {
+        const updated = payload.new as any;
+        if (!updated.is_active) {
+          setDisasterAlerts(prev => prev.filter(a => a.id !== updated.id));
+        }
+      })
+      .subscribe();
+
     // Uygulama ön plana geldiğinde (resume) tekrar kontrol et
     const subscription = AppState.addEventListener('change', nextAppState => {
       if (nextAppState === 'active') {
         checkNetworkAndSync();
+        fetchActiveAlerts();
       }
     });
 
@@ -233,14 +272,15 @@ export default function HomeScreen({ navigation }: Props) {
     const interval = setInterval(() => {
       checkNetworkAndSync();
       fetchCommunityHazards();
+      fetchMyReports();
+      fetchActiveAlerts();
     }, 10000);
 
     return () => {
+      supabase.removeChannel(channel);
       subscription.remove();
       clearInterval(interval);
-      if (sound) {
-        sound.unloadAsync();
-      }
+      if (sound) { sound.unloadAsync(); }
       Vibration.cancel();
     };
   }, [sound]);
@@ -289,9 +329,90 @@ export default function HomeScreen({ navigation }: Props) {
     }
   };
 
+  const fetchMyReports = async () => {
+    try {
+      const myIdsStr = await AsyncStorage.getItem('my_hazard_ids');
+      let myIds: string[] = [];
+      if (myIdsStr) myIds = JSON.parse(myIdsStr);
+
+      const { data: authData } = await supabase.auth.getSession();
+      const currentUserId = authData?.session?.user?.id;
+
+      let query = supabase.from('hazard_reports').select('*').order('created_at', { ascending: false });
+
+      if (currentUserId && myIds.length > 0) {
+        query = query.or(`user_id.eq.${currentUserId},id.in.(${myIds.map(id => `"${id}"`).join(',')})`);
+      } else if (currentUserId) {
+        query = query.eq('user_id', currentUserId);
+      } else if (myIds.length > 0) {
+        query = query.in('id', myIds);
+      } else {
+        if (__DEV__) {
+          // Dev modundaysak tüm ihbarları "benim" gibi göstersin
+          const { data } = await supabase.from('hazard_reports').select('*').order('created_at', { ascending: false }).limit(5);
+          if (data) setMyReports(data);
+        } else {
+          setMyReports([]);
+        }
+        return;
+      }
+
+      const { data } = await query;
+      if (data) setMyReports(data);
+    } catch (e) { console.log('My reports fetch error:', e); }
+  };
+
+  const handleDeleteMyReport = (reportId: string) => {
+    Alert.alert(
+      'İhbarı Sil',
+      'Bu geçmiş ihbarınızı silmek istediğinize emin misiniz?',
+      [
+        { text: 'İptal', style: 'cancel' },
+        {
+          text: 'Evet, Sil',
+          style: 'destructive',
+          onPress: async () => {
+            const isOnline = await checkInternetConnection();
+            if (isOnline) {
+              const { error } = await supabase.from('hazard_reports').delete().eq('id', reportId);
+              if (error) { Alert.alert('Hata', 'Silme başarısız: ' + error.message); return; }
+            }
+            const db = await getDb();
+            await db.runAsync('DELETE FROM hazard_reports WHERE id = ?', [reportId]);
+            Alert.alert('Silindi', 'İhbarınız başarıyla kaldırıldı.');
+            fetchMyReports();
+            fetchCommunityHazards();
+          }
+        }
+      ]
+    );
+  };
+
+  const handleSaveEdit = async () => {
+    if (!editingReport) return;
+    try {
+      const isOnline = await checkInternetConnection();
+      if (isOnline) {
+        const { error } = await supabase.from('hazard_reports').update({ hazard_type: editType, description: editDesc }).eq('id', editingReport.id);
+        if (error) { Alert.alert('Hata', 'Güncelleme başarısız: ' + error.message); return; }
+      }
+      const db = await getDb();
+      await db.runAsync('UPDATE hazard_reports SET hazard_type = ?, description = ? WHERE id = ?', [editType, editDesc, editingReport.id]);
+      
+      Alert.alert('Başarılı', 'İhbarınız güncellendi.');
+      setShowEditModal(false);
+      setEditingReport(null);
+      fetchMyReports();
+      fetchCommunityHazards();
+    } catch (e) {
+      console.log('Update error:', e);
+    }
+  };
+
   useFocusEffect(
     useCallback(() => {
       fetchCommunityHazards();
+      fetchMyReports();
       // Daha önce oy verilmiş ihbarları yükle
       AsyncStorage.getItem('voted_hazards').then(val => {
         if (val) setVotedHazards(new Set(JSON.parse(val)));
@@ -450,7 +571,7 @@ export default function HomeScreen({ navigation }: Props) {
           location: locationData,
           created_at: createdAt
         });
-        
+
         if (error) {
           Alert.alert('Supabase Hatası', 'Yardım çağrınız sunucuya iletilemedi:\n\n' + error.message);
           console.error('Supabase Insert Error:', error);
@@ -459,13 +580,13 @@ export default function HomeScreen({ navigation }: Props) {
       } else {
         await insertAidRequest(newId, userId, aidFullName, aidType, 'acil', aidDesc, 'pending', lat, lon, createdAt);
       }
-      
+
       setAidDesc('');
       setAidFullName('');
       setAidType('Tıbbi Yardım');
       Alert.alert('Başarılı', 'Yardım çağrınız sisteme ulaştı. Bölgedeki gönüllüler haberdar edildi.');
     };
-    
+
     processAid();
   };
 
@@ -487,12 +608,22 @@ export default function HomeScreen({ navigation }: Props) {
         </Text>
       </View>
 
-      {/* Dinamik Afet Uyarısı Simülasyonu */}
-      <DisasterAlert
-        type="FIRE"
-        title="YANGIN UYARISI"
-        message="Tahmini 15 dk içinde yangın bölgenize sıçrayabilir. Acil tahliye planına uyun!"
-      />
+      {/* Kriz Masası Uyarı Bannerlari (Realtime) */}
+      {disasterAlerts.map(alert => {
+        const colors: Record<string, string> = { FIRE: '#EF4444', FLOOD: '#3B82F6', EARTHQUAKE: '#F59E0B' };
+        const icons: Record<string, string> = { FIRE: '🔥', FLOOD: '🌊', EARTHQUAKE: '🌍' };
+        const color = colors[alert.alert_type] || '#EF4444';
+        const icon = icons[alert.alert_type] || '⚠️';
+        return (
+          <View key={alert.id} style={[styles.alertBanner, { backgroundColor: color }]}>
+            <Text style={styles.alertBannerIcon}>{icon}</Text>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.alertBannerTitle}>{alert.title}</Text>
+              <Text style={styles.alertBannerMsg}>{alert.message}</Text>
+            </View>
+          </View>
+        );
+      })}
 
       <View style={styles.emergencyContainer}>
         <TouchableOpacity
@@ -517,7 +648,7 @@ export default function HomeScreen({ navigation }: Props) {
         >
           <Text style={styles.actionBtnText}>{sirenPlaying ? 'SİRENİ KAPAT' : 'SİREN ÇAL'}</Text>
         </TouchableOpacity>
-        
+
         <TouchableOpacity
           style={[styles.actionBtn, { backgroundColor: '#3B82F6' }]}
           onPress={() => setShowAidModal(true)}
@@ -563,6 +694,52 @@ export default function HomeScreen({ navigation }: Props) {
           <Text style={[styles.aiDesc, { marginTop: 4, color: quakeRisk.level === 'HIGH' ? '#EF4444' : '#475569', fontWeight: quakeRisk.level === 'HIGH' ? 'bold' : 'normal' }]}>
             {quakeRisk.level === 'HIGH' ? ' DİKKAT: Zemin sıvılaşma riski veya faya yakınlık sebebiyle binanızın acil deprem dayanım testi yaptırması önerilir!' : ' Bulunduğunuz zemin ve konum itibarıyla risk standart seviyededir.'}
           </Text>
+        </View>
+      )}
+
+      {/* Geçmiş İhbarlarım (Kullanıcının kendi ekledikleri) */}
+      {myReports.length > 0 && (
+        <View style={{ marginTop: 16, paddingHorizontal: 16 }}>
+          <Text style={[styles.sectionTitle, { marginBottom: 8 }]}>Geçmiş İhbarlarım</Text>
+          <FlatList
+            horizontal
+            data={myReports}
+            keyExtractor={(item) => item.id}
+            showsHorizontalScrollIndicator={false}
+            renderItem={({ item }) => {
+              // Haritadaki aynı hata yakalamayı buraya da ekliyoruz (inline logic for brevity)
+              return (
+                <View style={[styles.hazardCard, { borderColor: '#7C3AED', borderWidth: 1 }]}>
+                  <View style={styles.hazardHeader}>
+                    <Text style={[styles.hazardTitle, { color: '#7C3AED' }]}>🟣 {item.hazard_type}</Text>
+                  </View>
+                  {item.image_uri && (
+                    <Image source={{ uri: item.image_uri }} style={styles.hazardImage} />
+                  )}
+                  <Text style={styles.hazardDescText} numberOfLines={2}>{item.description}</Text>
+                  <View style={{ flexDirection: 'row', gap: 8, marginTop: 12 }}>
+                    <TouchableOpacity 
+                      style={[styles.voteBtn, { backgroundColor: '#7C3AED', flex: 1 }]} 
+                      onPress={() => {
+                        setEditingReport(item);
+                        setEditType(item.hazard_type);
+                        setEditDesc(item.description);
+                        setShowEditModal(true);
+                      }}
+                    >
+                      <Text style={styles.voteBtnText}>✏️ Düzenle</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity 
+                      style={[styles.voteBtn, { backgroundColor: '#EF4444', flex: 1 }]} 
+                      onPress={() => handleDeleteMyReport(item.id)}
+                    >
+                      <Text style={styles.voteBtnText}>🗑️ Sil</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              );
+            }}
+          />
         </View>
       )}
 
@@ -634,7 +811,7 @@ export default function HomeScreen({ navigation }: Props) {
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <Text style={styles.modalTitle}>🆘 Yardım / İhbar Formu</Text>
-            
+
             <TextInput
               style={styles.input}
               placeholder="Ad Soyad"
@@ -642,7 +819,7 @@ export default function HomeScreen({ navigation }: Props) {
               value={aidFullName}
               onChangeText={setAidFullName}
             />
-            
+
             <Text style={styles.label}>İhtiyaç Türü:</Text>
             <View style={styles.typeContainer}>
               {['Tıbbi Yardım', 'Enkaz Kurtarma', 'Erzak', 'Diğer'].map((type) => (
@@ -676,6 +853,49 @@ export default function HomeScreen({ navigation }: Props) {
         </View>
       </Modal>
 
+      {/* Geçmiş İhbarı Düzenle Modal Formu */}
+      <Modal visible={showEditModal} transparent animationType="slide">
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>✏️ İhbarı Düzenle</Text>
+
+            <Text style={styles.label}>Tehlike Türü:</Text>
+            <View style={styles.typeContainer}>
+              {['YANGIN', 'SEL', 'DEPREM', 'ENKAZ', 'DİĞER'].map((type) => (
+                <TouchableOpacity
+                  key={'edit-' + type}
+                  style={[styles.typeBtn, editType === type && styles.typeBtnSelected]}
+                  onPress={() => setEditType(type)}
+                >
+                  <Text style={[styles.typeBtnText, editType === type && styles.typeBtnTextSelected]}>{type}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            <TextInput
+              style={[styles.input, { height: 80, textAlignVertical: 'top' }]}
+              placeholder="Tehlike detayları, son durum..."
+              placeholderTextColor="#94A3B8"
+              multiline
+              value={editDesc}
+              onChangeText={setEditDesc}
+            />
+
+            <View style={styles.modalActions}>
+              <TouchableOpacity style={styles.cancelBtn} onPress={() => {
+                setShowEditModal(false);
+                setEditingReport(null);
+              }}>
+                <Text style={styles.cancelBtnText}>İPTAL</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.submitBtn} onPress={handleSaveEdit}>
+                <Text style={styles.submitBtnText}>KAYDET</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
     </ScrollView>
   );
 }
@@ -694,6 +914,30 @@ const styles = StyleSheet.create({
     color: '#FFF',
     fontWeight: 'bold',
     fontSize: 14,
+  },
+  alertBanner: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    padding: 16,
+    marginHorizontal: 12,
+    marginTop: 8,
+    borderRadius: 12,
+    gap: 12,
+  },
+  alertBannerIcon: {
+    fontSize: 28,
+    marginTop: 2,
+  },
+  alertBannerTitle: {
+    color: '#FFF',
+    fontWeight: 'bold',
+    fontSize: 15,
+    marginBottom: 6,
+  },
+  alertBannerMsg: {
+    color: 'rgba(255,255,255,0.92)',
+    fontSize: 13,
+    lineHeight: 20,
   },
   emergencyContainer: {
     flexDirection: 'row',
